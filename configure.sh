@@ -2,107 +2,120 @@
 
 clear
 echo "=================================================="
-echo "      CONFIGURADOR DE AMBIENTE: DRONE SECTOR       "
+echo "      CONFIGURADOR DE AMBIENTE DINÂMICO           "
 echo "=================================================="
-echo "1) Rodar TUDO LOCAL (Nesta mesma máquina)"
-echo "2) Rodar DISTRIBUÍDO (Múltiplos computadores físicos)"
-echo "=================================================="
-read -p "Escolha uma opção (1 ou 2): " opcao
 
-if [ "$opcao" == "1" ]; then
-    echo "Configurando para ambiente LOCAL..."
-    
-    # Substitui as marcações pelos hostnames internos do Docker
-    sed -e 's/s1_bind/sector1:5001/g' \
-        -e 's/s1_peers/sector2:5002,sector3:5003/g' \
-        -e 's/s2_bind/sector2:5002/g' \
-        -e 's/s2_peers/sector1:5001,sector3:5003/g' \
-        -e 's/s3_bind/sector3:5003/g' \
-        -e 's/s3_peers/sector1:5001,sector2:5002/g' \
-        docker-compose.template.yaml > docker-compose.yaml
-
-    echo "Limpando volumes antigos para evitar conflitos..."
-    docker compose down -v
-    echo "✓ Pronto! Agora basta rodar: docker compose up --build"
-
-elif [ "$opcao" == "2" ]; then
-    echo "Configurando para ambiente DISTRIBUÍDO..."
-    echo ""
-    echo "PASSO 1: Informe os IPs dos três computadores"
-    read -p "Digite o IP do computador onde Sector 1 rodará: " ip1
-    read -p "Digite o IP do computador onde Sector 2 rodará: " ip2
-    read -p "Digite o IP do computador onde Sector 3 rodará: " ip3
-    
-    echo ""
-    echo "PASSO 2: Selecione qual setor roda NESTE computador"
-    read -p "Qual setor você quer rodar aqui? (1, 2 ou 3): " sector_choice
-
-    # Validação de entrada
-    if ! [[ "$sector_choice" =~ ^[1-3]$ ]]; then
-        echo "Erro: Escolha um setor válido (1, 2 ou 3)"
-        exit 1
-    fi
-
-    # Validação de IPs
-    echo ""
-    echo "Validando IPs..."
-    for ip in "$ip1" "$ip2" "$ip3"; do
-        if ! [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-            echo "Erro: IP inválido - $ip"
-            exit 1
-        fi
-    done
-    echo "IPs validados"
-
-    # Cria arquivo temporário
-    temp_file=$(mktemp)
-    
-    # Substitui TODOS os placeholders pelos valores reais
-    # IMPORTANTE: Usa 0.0.0.0 para BIND_ADDR (container liga em todas as interfaces)
-    sed -e "s/s1_bind/0.0.0.0:5001/g" \
-        -e "s/s1_peers/$ip1:5001,$ip2:5002,$ip3:5003/g" \
-        -e "s/s2_bind/0.0.0.0:5002/g" \
-        -e "s/s2_peers/$ip1:5001,$ip2:5002,$ip3:5003/g" \
-        -e "s/s3_bind/0.0.0.0:5003/g" \
-        -e "s/s3_peers/$ip1:5001,$ip2:5002,$ip3:5003/g" \
-        docker-compose.template.yaml > "$temp_file"
-
-    # Automaticamente comenta os setores que NÃO devem rodar neste computador
-    case $sector_choice in
-        1)
-            # Comenta sector2 e sector3
-            sed -i '/^  sector2:$/,/^  [^ ]/{ /^  [^ ]/!s/^/#/; }' "$temp_file"
-            sed -i '/^  sector3:$/,/^volumes:$/{ /^volumes:$/!s/^/#/; }' "$temp_file"
-            echo "Configurado: Sector 1 será executado neste computador ($ip1:5001)"
-            ;;
-        2)
-            # Comenta sector1 e sector3
-            sed -i '/^  sector1:$/,/^  sector2:$/{ /^  sector2:$/!s/^/#/; }' "$temp_file"
-            sed -i '/^  sector3:$/,/^volumes:$/{ /^volumes:$/!s/^/#/; }' "$temp_file"
-            echo "Configurado: Sector 2 será executado neste computador ($ip2:5002)"
-            ;;
-        3)
-            # Comenta sector1 e sector2
-            sed -i '/^  sector1:$/,/^  sector2:$/{ /^  sector2:$/!s/^/#/; }' "$temp_file"
-            sed -i '/^  sector2:$/,/^  sector3:$/{ /^  sector3:$/!s/^/#/; }' "$temp_file"
-            echo "Configurado: Sector 3 será executado neste computador ($ip3:5003)"
-            ;;
-    esac
-
-    # Move arquivo gerado para o destino final
-    mv "$temp_file" docker-compose.yaml
-
-    echo ""
-    echo "Ambiente distribuído gerado com sucesso!"
-    echo "Limpando volumes antigos para evitar conflitos..."
-    docker compose down -v
-    echo ""
-    echo "Configuração completa! Agora basta rodar:"
-    echo "docker compose up --build"
-    echo ""
-    echo "IMPORTANTE: Execute este script em cada computador da rede com os MESMOS IPs!"
-
-else
-    echo "Opção inválida."
+# 1. Definição da quantidade de setores
+read -p "Quantos setores (nós) farão parte do cluster? (Ex: 3): " total_setores
+if ! [[ "$total_setores" =~ ^[0-9]+$ ]] || [ "$total_setores" -le 0 ]; then
+    echo "Erro: Quantidade inválida."
     exit 1
 fi
+
+# 2. Coleta de IPs de todos os setores
+declare -A sector_ips
+echo ""
+echo "--- PASSO 1: Mapeamento de IPs ---"
+for ((i=1; i<=total_setores; i++)); do
+    read -p "Digite o IP do computador onde o Sector $i vai rodar: " ip
+    
+    # Validação simples de IP
+    if ! [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        echo "Erro: IP inválido ($ip)."
+        exit 1
+    fi
+    sector_ips[$i]=$ip
+done
+
+# 3. Construção da string de PEERS (comum a todos)
+# Formato: ip1:5001,ip2:5002,ip3:5003...
+peers_string=""
+for ((i=1; i<=total_setores; i++)); do
+    port=$((5000 + i))
+    peers_string+="${sector_ips[$i]}:$port"
+    if [ $i -lt $total_setores ]; then
+        peers_string+=","
+    fi
+done
+
+# 4. Identificação do que roda NESTA máquina
+echo ""
+echo "--- PASSO 2: Configuração Local ---"
+echo "Quais setores você deseja que rodem NESTA máquina específica?"
+echo "Instrução: Digite os números separados por espaço (Ex: '1' ou '1 2' ou '1 3 4')"
+read -p "Setores para esta máquina: " setores_locais
+
+# Validar se o usuário digitou pelo menos um setor válido
+has_local=false
+for s in $setores_locais; do
+    if [[ "$s" =~ ^[0-9]+$ ]] && [ "$s" -le "$total_setores" ] && [ "$s" -gt 0 ]; then
+        has_local=true
+    fi
+done
+
+if [ "$has_local" = false ]; then
+    echo "Erro: Você precisa selecionar pelo menos um setor válido para esta máquina."
+    exit 1
+fi
+
+# 5. Geração do docker-compose.yaml customizado
+echo ""
+echo "Gerando docker-compose.yaml..."
+
+# Início do arquivo
+cat << EOF > docker-compose.yaml
+services:
+EOF
+
+# Adiciona apenas os serviços selecionados para esta máquina
+for s in $setores_locais; do
+    # Garante que é um número válido dentro do escopo
+    if ! [[ "$s" =~ ^[0-9]+$ ]] || [ "$s" -gt "$total_setores" ] || [ "$s" -le 0 ]; then
+        continue
+    fi
+
+    port_raft=$((5000 + s))
+    port_http=$((7000 + s))
+
+    cat << EOF >> docker-compose.yaml
+  sector$s:
+    build:
+      context: .
+      dockerfile: Sectors/Dockerfile
+    container_name: sector$s
+    restart: always 
+    environment:
+      - SECTOR_ID=sector$s
+      - BIND_ADDR=0.0.0.0:$port_raft
+      - PEERS=$peers_string
+      - DATA_DIR=/tmp/raft-sector$s
+      - HTTP_PORT=$port_http
+    ports:
+      - "$port_raft:$port_raft"
+      - "$port_http:$port_http"
+    volumes:
+      - raft-data-$s:/tmp/raft-sector$s
+
+EOF
+done
+
+# Adiciona a seção de volumes apenas para os setores locais
+cat << EOF >> docker-compose.yaml
+volumes:
+EOF
+
+for s in $setores_locais; do
+    if ! [[ "$s" =~ ^[0-9]+$ ]] || [ "$s" -gt "$total_setores" ] || [ "$s" -le 0 ]; then
+        continue
+    fi
+    echo "  raft-data-$s:" >> docker-compose.yaml
+done
+
+# 6. Finalização e limpeza do Docker
+echo "Limpando volumes antigos locais para evitar conflitos..."
+docker compose down -v 2>/dev/null
+
+echo ""
+echo "✓ Configuração concluída com sucesso para esta máquina!"
+echo "O arquivo 'docker-compose.yaml' foi gerado contendo APENAS os seus setores locais."
+echo "Para iniciar, execute: docker compose up --build"
