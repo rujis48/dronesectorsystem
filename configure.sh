@@ -12,20 +12,40 @@ if ! [[ "$total_setores" =~ ^[0-9]+$ ]] || [ "$total_setores" -le 0 ]; then
     exit 1
 fi
 
+# Como você deseja definir os IPs dos setores?
+echo ""
+echo "1) Digitar manualmente o IP de cada setor"
+echo "2) Usar IPs automáticos (127.0.0.1 para todos) - para ambiente local dockerizado"
+read -p "Escolha uma opção (1 ou 2): " ip_choice
+
+# Validar a escolha
+if [[ ! "$ip_choice" =~ ^[1-2]$ ]]; then
+    echo "Erro: Opção inválida."
+    exit 1
+fi
+
 # 2. Coleta de IPs de todos os setores
 declare -A sector_ips
 echo ""
-echo "--- PASSO 1: Mapeamento de IPs ---"
-for ((i=1; i<=total_setores; i++)); do
-    read -p "Digite o IP do computador onde o Sector $i vai rodar: " ip
-    
-    # Validação simples de IP
-    if ! [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-        echo "Erro: IP inválido ($ip)."
-        exit 1
-    fi
-    sector_ips[$i]=$ip
-done
+if [ "$ip_choice" -eq 1 ]; then
+    echo "--- PASSO 1: Mapeamento de IPs (Manual) ---"
+    for ((i=1; i<=total_setores; i++)); do
+        read -p "Digite o IP do computador onde o Sector $i vai rodar: " ip
+
+        # Validação simples de IP
+        if ! [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            echo "Erro: IP inválido ($ip)."
+            exit 1
+        fi
+        sector_ips[$i]=$ip
+    done
+else
+    echo "--- PASSO 1: Mapeamento de IPs (Automático - Local) ---"
+    for ((i=1; i<=total_setores; i++)); do
+        sector_ips[$i]="sector$i"
+        echo "Setor $i: IP definido automaticamente como sector$i"
+    done
+fi
 
 # 3. Construção da string de PEERS (comum a todos)
 # Formato: ip1:5001,ip2:5002,ip3:5003...
