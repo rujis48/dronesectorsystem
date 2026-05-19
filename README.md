@@ -60,7 +60,7 @@ Para acompanhar a alocação de drones, o status do cluster e quem assumiu o pap
 
 ---
 
-### 4. Simulação de Cenários e Testes de Resiliência (Chaos Engineering)
+### 4. Simulação de Cenários e Testes de Resiliência.
 
 Para validar o funcionamento do algoritmo de consenso Raft e os tempos de timeout de segurança, abra um terminal paralelo com o Docker ativo e execute:
 

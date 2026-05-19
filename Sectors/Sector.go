@@ -184,8 +184,50 @@ func main() {
 								finishCmd := drones.Command{Op: "finish_fix", DroneID: d.ID}
 								data, _ := json.Marshal(finishCmd)
 								r.Apply(data, 10*time.Second)
+
+								// Tenta processar fila após liberar drone
+								log.Printf("[LÍDER] Processando fila distribuída após liberação...")
+								processQueueCmd := drones.Command{
+									Op:              "process_queue",
+									DurationSeconds: 0, // Será recalculado ao processar
+								}
+								queueData, _ := json.Marshal(processQueueCmd)
+								r.Apply(queueData, 10*time.Second)
 							}
 						}
+					}
+				}
+			}
+		}
+	}()
+
+	// Rotina do Líder: Monitoramento contínuo da fila distribuída
+	// Processa requisições enfileiradas periodicamente
+	go func() {
+		for {
+			time.Sleep(5 * time.Second) // Processa fila a cada 5 segundos
+			if r.State() == raft.Leader {
+				queueSize := fsm.GetQueueSize()
+				if queueSize > 0 {
+					log.Printf("[LÍDER] Fila distribuída com %d requisição(ões). Tentando processar...", queueSize)
+
+					processQueueCmd := drones.Command{
+						Op:              "process_queue",
+						DurationSeconds: 0,
+					}
+					data, _ := json.Marshal(processQueueCmd)
+					future := r.Apply(data, 10*time.Second)
+
+					if future.Error() == nil {
+						if result := future.Response(); result != nil {
+							if resultMap, ok := result.(map[string]interface{}); ok {
+								processed := resultMap["processed"]
+								remaining := resultMap["remaining_queue"]
+								log.Printf("[FILA] Processamento: %v satisfeitas, %v restando na fila", processed, remaining)
+							}
+						}
+					} else {
+						log.Printf("[FILA] Erro ao processar: %v", future.Error())
 					}
 				}
 			}
@@ -221,31 +263,48 @@ func main() {
 			fixTime := computeFixDuration(severity, estimatedDrones)
 			durationSecs := int(fixTime.Seconds())
 
-			// CORREÇÃO: Sorteia qual setor da rede vai sofrer o problema (pode ser o 1, 2 ou 3)
+			// Sorteia qual setor da rede vai sofrer o problema (pode ser o 1, 2 ou 3)
 			targetSector := allSectors[rand.Intn(len(allSectors))]
 
-			log.Printf("[LÍDER] Problema %s GERADO GLOBALMENTE para o %s. Tempo estimado: %ds", severity, targetSector, durationSecs)
+			log.Printf("[LÍDER] Problema %s GERADO para %s. Drones necessários: %d. Duração: %ds", severity, targetSector, estimatedDrones, durationSecs)
 
-			// Enviamos o targetSector sorteado no comando Raft, em vez do ID local fixo
+			// Comando com timeout melhorado (20 segundos para aplicação)
 			cmd := drones.Command{
-				Op:              "assign",
-				SectorID:        targetSector, // <--- Agora o comando leva o setor sorteado!
+				Op:              "assign_with_fallback",
+				SectorID:        targetSector,
 				Severity:        severity,
 				DurationSeconds: durationSecs,
 			}
 			data, _ := json.Marshal(cmd)
-			future := r.Apply(data, 10*time.Second)
+			future := r.Apply(data, 20*time.Second)
+
+			// Tratamento robusto de erros e timeouts
 			if future.Error() != nil {
-				log.Printf("Failed to apply command: %s", future.Error())
+				log.Printf("[LÍDER] ✗ Erro ao aplicar comando para %s: %v", targetSector, future.Error())
+				continue
+			}
+
+			response := future.Response()
+			if response == nil {
+				log.Printf("[LÍDER] ✗ Resposta nula ao alocar drones para %s", targetSector)
+				continue
+			}
+
+			assigned, ok := response.([]int)
+			if !ok {
+				log.Printf("[LÍDER] ✗ Tipo de resposta inválido para %s", targetSector)
+				continue
+			}
+
+			if len(assigned) == 0 {
+				log.Printf("[LÍDER] ✗ Sem drones disponíveis para alocar em %s", targetSector)
+				continue
+			}
+
+			if len(assigned) < estimatedDrones {
+				log.Printf("[LÍDER] ⚠ Alocação parcial para %s: %d de %d drones solicitados", targetSector, len(assigned), estimatedDrones)
 			} else {
-				if response := future.Response(); response != nil {
-					assigned, ok := response.([]int)
-					if !ok || len(assigned) == 0 {
-						log.Printf("[LÍDER] Falha ao alocar drones para o %s (Pool de drones vazio)", targetSector)
-						continue
-					}
-					log.Printf("[LÍDER] %d drone(s) BLOQUEADO(S) com sucesso para o %s (Problema: %s)", len(assigned), targetSector, severity)
-				}
+				log.Printf("[LÍDER] ✓ Alocação bem-sucedida: %d drone(s) para %s (severidade=%s)", len(assigned), targetSector, severity)
 			}
 		}
 	}()
@@ -253,7 +312,7 @@ func main() {
 	go func() {
 		for {
 			time.Sleep(10 * time.Second)
-			log.Printf("Sector %s: Available drones locally or globally here: %d", id, fsm.GetAvailableCount())
+			log.Printf("[STATUS] Sector %s: %d drones disponíveis", id, fsm.GetAvailableCount())
 		}
 	}()
 
@@ -287,6 +346,78 @@ func main() {
 			"drones":    ds,
 		}
 		_ = json.NewEncoder(w).Encode(status)
+	})
+
+	// endpoint de 'Health Check' com confirmação de recebimento
+	mux.HandleFunc("/confirm", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		// Verifica se o Raft está em estado saudável (não Shutdown)
+		// States válidos: Follower, Candidate, Leader
+		currentState := r.State()
+		isHealthy := currentState != raft.Shutdown
+
+		confirmResp := map[string]interface{}{
+			"confirmed":  isHealthy,
+			"sector_id":  id,
+			"is_leader":  currentState == raft.Leader,
+			"timestamp":  time.Now().Format("2006-01-02T15:04:05Z07:00"),
+			"raft_state": currentState.String(),
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(confirmResp)
+	})
+
+	// Endpoint para consultar a fila distribuída
+	mux.HandleFunc("/queue", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		queue := fsm.GetQueue()
+		if queue == nil {
+			queue = make([]drones.PendingRequest, 0)
+		}
+
+		queueResp := map[string]interface{}{
+			"sector_id":  id,
+			"queue_size": len(queue),
+			"is_leader":  r.State() == raft.Leader,
+			"queue":      queue,
+		}
+		_ = json.NewEncoder(w).Encode(queueResp)
+	})
+
+	// Endpoint com estatísticas da fila
+	mux.HandleFunc("/queue/status", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		queue := fsm.GetQueue()
+		drones := fsm.GetDrones()
+
+		availableCount := 0
+		for _, d := range drones {
+			if d.Status == "available" {
+				availableCount++
+			}
+		}
+
+		var oldestReqAge time.Duration
+		if len(queue) > 0 {
+			oldestReqAge = time.Since(queue[0].QueuedAt)
+		}
+
+		queueStatus := map[string]interface{}{
+			"sector_id":              id,
+			"queue_size":             len(queue),
+			"drones_available":       availableCount,
+			"drones_total":           len(drones),
+			"oldest_request_age_sec": int(oldestReqAge.Seconds()),
+			"is_leader":              r.State() == raft.Leader,
+		}
+		_ = json.NewEncoder(w).Encode(queueStatus)
 	})
 
 	go func() {

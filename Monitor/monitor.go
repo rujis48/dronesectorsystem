@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -21,9 +22,75 @@ type StatusResponse struct {
 	Drones   []Drone `json:"drones"`
 }
 
+type ConfirmResponse struct {
+	Confirmed bool   `json:"confirmed"`
+	SectorID  string `json:"sector_id"`
+	Timestamp string `json:"timestamp"`
+}
+
 type SectorState struct {
 	Online   bool
 	IsLeader bool
+}
+
+// fetchSectorStatus faz retransmissão automática com backoff exponencial
+// Tenta até 3 vezes com delay incrementando entre tentativas
+func fetchSectorStatus(url string) (*StatusResponse, error) {
+	maxRetries := 3
+	timeout := 800 * time.Millisecond
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		client := http.Client{Timeout: timeout}
+		resp, err := client.Get(url)
+
+		// Sucesso
+		if err == nil && resp.StatusCode == 200 {
+			var sr StatusResponse
+			decodeErr := json.NewDecoder(resp.Body).Decode(&sr)
+			resp.Body.Close()
+
+			if decodeErr == nil {
+				return &sr, nil
+			}
+			// Se falhar ao decodificar, retenta
+		} else if resp != nil {
+			resp.Body.Close()
+		}
+
+		// Se for a última tentativa, retorna erro
+		if attempt == maxRetries {
+			return nil, fmt.Errorf("falha após %d tentativas para %s", maxRetries, url)
+		}
+
+		// Backoff exponencial: 50ms, 150ms, 300ms
+		backoff := time.Duration(50*attempt) * time.Millisecond
+		time.Sleep(backoff)
+	}
+
+	return nil, fmt.Errorf("falha ao conectar em %s", url)
+}
+
+// confirmSectorHealth envia um health check com confirmação de recebimento
+func confirmSectorHealth(url string) bool {
+	confirmURL := strings.Replace(url, "/status", "/confirm", 1)
+	client := http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := client.Get(confirmURL)
+
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return false
+	}
+
+	var cr ConfirmResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		return false
+	}
+
+	return cr.Confirmed
 }
 
 func main() {
@@ -47,24 +114,27 @@ func main() {
 		var globalDrones []Drone
 		dataFetched := false
 
-		// Coleta os dados de todos os setores
+		// Coleta os dados de todos os setores COM RETRANSMISSÃO
 		for sectorID, url := range endpoints {
-			client := http.Client{Timeout: 800 * time.Millisecond}
-			resp, err := client.Get(url)
+			sr, err := fetchSectorStatus(url)
+
 			if err != nil {
 				sectorsInfo[sectorID] = SectorState{Online: false, IsLeader: false}
+				log.Printf("[MONITOR] Setor %s offline: %v", sectorID, err)
 				continue
 			}
 
-			var sr StatusResponse
-			if err := json.NewDecoder(resp.Body).Decode(&sr); err == nil {
-				sectorsInfo[sectorID] = SectorState{Online: true, IsLeader: sr.IsLeader}
-				if !dataFetched {
-					globalDrones = sr.Drones
-					dataFetched = true
-				}
+			// Confirma que setor respondeu corretamente (health check)
+			isHealthy := confirmSectorHealth(url)
+			if !isHealthy {
+				log.Printf("[MONITOR] Health check falhou para %s", sectorID)
 			}
-			resp.Body.Close()
+
+			sectorsInfo[sectorID] = SectorState{Online: true, IsLeader: sr.IsLeader}
+			if !dataFetched {
+				globalDrones = sr.Drones
+				dataFetched = true
+			}
 		}
 
 		// Renderiza a caixa de cada um dos 3 setores
