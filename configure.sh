@@ -22,8 +22,8 @@ if [ "$opcao" == "1" ]; then
         docker-compose.template.yaml > docker-compose.yaml
 
     echo "Limpando volumes antigos para evitar conflitos..."
-    sudo docker compose down -v
-    echo "✓ Pronto! Agora basta rodar: sudo docker compose up --build"
+    docker compose down -v
+    echo "✓ Pronto! Agora basta rodar: docker compose up --build"
 
 elif [ "$opcao" == "2" ]; then
     echo "Configurando para ambiente DISTRIBUÍDO..."
@@ -39,7 +39,7 @@ elif [ "$opcao" == "2" ]; then
 
     # Validação de entrada
     if ! [[ "$sector_choice" =~ ^[1-3]$ ]]; then
-        echo "❌ Erro: Escolha um setor válido (1, 2 ou 3)"
+        echo "Erro: Escolha um setor válido (1, 2 ou 3)"
         exit 1
     fi
 
@@ -48,7 +48,7 @@ elif [ "$opcao" == "2" ]; then
     echo "Validando IPs..."
     for ip in "$ip1" "$ip2" "$ip3"; do
         if ! [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-            echo "❌ Erro: IP inválido - $ip"
+            echo "Erro: IP inválido - $ip"
             exit 1
         fi
     done
@@ -95,10 +95,10 @@ elif [ "$opcao" == "2" ]; then
     echo ""
     echo "Ambiente distribuído gerado com sucesso!"
     echo "Limpando volumes antigos para evitar conflitos..."
-    sudo docker compose down -v
+    docker compose down -v
     echo ""
     echo "Configuração completa! Agora basta rodar:"
-    echo "sudo docker compose up --build"
+    echo "docker compose up --build"
     echo ""
     echo "IMPORTANTE: Execute este script em cada computador da rede com os MESMOS IPs!"
 
