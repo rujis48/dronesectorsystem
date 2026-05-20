@@ -125,18 +125,36 @@ func main() {
 		log.Fatal(err)
 	}
 
-	servers := make([]raft.Server, len(peers)+1)
+	// Count how many peers are not self to size the array correctly
+	peerCount := 0
+	for _, peer := range peers {
+		parts := strings.Split(peer, ":")
+		if len(parts) != 2 {
+			continue
+		}
+		peerID := parts[0]
+		if peerID != id {
+			peerCount++
+		}
+	}
+
+	servers := make([]raft.Server, 1+peerCount)
 	servers[0] = raft.Server{
 		ID:      raft.ServerID(id),
 		Address: raft.ServerAddress(bindAddr),
 	}
 
-	for i, peer := range peers {
+	// Add peers, skipping self
+	index := 0
+	for _, peer := range peers {
 		parts := strings.Split(peer, ":")
 		if len(parts) != 2 {
-			log.Fatal("Invalid peer format")
+			continue
 		}
 		peerID := parts[0]
+		if peerID == id {
+			continue // Skip self
+		}
 
 		peerIPs, err := net.LookupIP(peerID)
 		if err != nil {
@@ -144,7 +162,8 @@ func main() {
 		}
 		realPeerAddr := peerIPs[0].String() + ":" + parts[1]
 
-		servers[i+1] = raft.Server{
+		index++
+		servers[index] = raft.Server{
 			ID:      raft.ServerID(peerID),
 			Address: raft.ServerAddress(realPeerAddr),
 		}
@@ -181,9 +200,34 @@ func main() {
 						for _, d := range ds {
 							if d.Status == "fixing" && !d.FinishAt.IsZero() && time.Now().After(d.FinishAt) {
 								log.Printf("[LÍDER] Tempo esgotado! Liberando drone %d do Setor %s", d.ID, d.AssignedTo)
+
+								// Testa falha simulada do drone (30% de chance)
+								failureCmd := drones.Command{Op: "simulate_drone_failure", DroneID: d.ID}
+								failureData, _ := json.Marshal(failureCmd)
+								failureFuture := r.Apply(failureData, 10*time.Second)
+
+								if failureFuture.Error() == nil {
+									if failureResult := failureFuture.Response(); failureResult != nil {
+										if failureMap, ok := failureResult.(map[string]interface{}); ok {
+											if failed, ok := failureMap["failed"].(bool); ok && failed {
+												log.Printf("[FAILURE] ✗ Drone %d FALHOU após o conserto!", d.ID)
+												// Falha de drone é registrada, aguardando healthcheck
+												continue
+											}
+										}
+									}
+								}
+
+								// Drone bem-sucedido: Envia heartbeat
+								heartbeatCmd := drones.Command{Op: "heartbeat_drone", DroneID: d.ID}
+								heartbeatData, _ := json.Marshal(heartbeatCmd)
+								r.Apply(heartbeatData, 10*time.Second)
+								log.Printf("[HEARTBEAT] ✓ Drone %d respondeu (healthcheck OK)", d.ID)
+
+								// Libera o drone normalmente
 								finishCmd := drones.Command{Op: "finish_fix", DroneID: d.ID}
-								data, _ := json.Marshal(finishCmd)
-								r.Apply(data, 10*time.Second)
+								finishData, _ := json.Marshal(finishCmd)
+								r.Apply(finishData, 10*time.Second)
 
 								// Tenta processar fila após liberar drone
 								log.Printf("[LÍDER] Processando fila distribuída após liberação...")
@@ -228,6 +272,57 @@ func main() {
 						}
 					} else {
 						log.Printf("[FILA] Erro ao processar: %v", future.Error())
+					}
+				}
+			}
+		}
+	}()
+
+	// Rotina do Líder: Healthcheck de Drones - Detecta e recupera drones mortos
+	go func() {
+		for {
+			time.Sleep(7 * time.Second) // Verifica a cada 7 segundos
+			if r.State() == raft.Leader {
+				// Detecta drones mortos
+				detectCmd := drones.Command{Op: "detect_dead_drones"}
+				data, _ := json.Marshal(detectCmd)
+				future := r.Apply(data, 10*time.Second)
+
+				if future.Error() == nil {
+					if result := future.Response(); result != nil {
+						if resultMap, ok := result.(map[string]interface{}); ok {
+							deadDronesIface := resultMap["dead_drones"]
+							if deadDronesSlice, ok := deadDronesIface.([]interface{}); ok && len(deadDronesSlice) > 0 {
+								for _, deadIDIface := range deadDronesSlice {
+									if deadID, ok := deadIDIface.(float64); ok {
+										droneID := int(deadID)
+										// Obtém informações do drone morto
+										getDronesCmd := drones.Command{Op: "get_drones"}
+										getDronesData, _ := json.Marshal(getDronesCmd)
+										getDronesFuture := r.Apply(getDronesData, 10*time.Second)
+										if getDronesFuture.Error() == nil {
+											if dronesList := getDronesFuture.Response(); dronesList != nil {
+												dronesList := dronesList.([]drones.Drone)
+												var droneSetor string
+												for _, d := range dronesList {
+													if d.ID == droneID {
+														droneSetor = d.AssignedTo
+														break
+													}
+												}
+												// Cria novo drone para substituição
+												createCmd := drones.Command{
+													Op:       "create_drone",
+													SectorID: droneSetor,
+												}
+												createData, _ := json.Marshal(createCmd)
+												r.Apply(createData, 10*time.Second)
+											}
+										}
+									}
+								}
+							}
+						}
 					}
 				}
 			}
@@ -418,6 +513,52 @@ func main() {
 			"is_leader":              r.State() == raft.Leader,
 		}
 		_ = json.NewEncoder(w).Encode(queueStatus)
+	})
+
+	// Endpoint para visualizar status de healthcheck dos drones
+	mux.HandleFunc("/drones/health", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		dronesList := fsm.GetDrones()
+		if dronesList == nil {
+			dronesList = make([]drones.Drone, 0)
+		}
+
+		type DroneHealthInfo struct {
+			ID                   int       `json:"id"`
+			Status               string    `json:"status"`
+			Health               string    `json:"health"`
+			AssignedTo           string    `json:"assigned_to"`
+			LastHeartbeat        time.Time `json:"last_heartbeat"`
+			ConsecutiveFailures  int       `json:"consecutive_failures"`
+			ConsecutiveSuccesses int       `json:"consecutive_successes"`
+			TimeSinceHeartbeat   int       `json:"time_since_heartbeat_sec"`
+		}
+
+		healthInfo := make([]DroneHealthInfo, len(dronesList))
+		now := time.Now()
+		for i, d := range dronesList {
+			timeSince := int(now.Sub(d.LastHeartbeat).Seconds())
+			healthInfo[i] = DroneHealthInfo{
+				ID:                   d.ID,
+				Status:               d.Status,
+				Health:               d.Health,
+				AssignedTo:           d.AssignedTo,
+				LastHeartbeat:        d.LastHeartbeat,
+				ConsecutiveFailures:  d.ConsecutiveFailures,
+				ConsecutiveSuccesses: d.ConsecutiveSuccesses,
+				TimeSinceHeartbeat:   timeSince,
+			}
+		}
+
+		healthResp := map[string]interface{}{
+			"sector_id":     id,
+			"is_leader":     r.State() == raft.Leader,
+			"timestamp":     time.Now().Format("2006-01-02T15:04:05Z07:00"),
+			"drones_health": healthInfo,
+		}
+		_ = json.NewEncoder(w).Encode(healthResp)
 	})
 
 	go func() {
