@@ -95,10 +95,10 @@ for s in $setores_locais; do
     port_raft=$((5000 + s))
     port_http=$((7000 + s))
 
-    # O bind interno deve ser sempre 0.0.0.0 para aceitar conexões vindas de fora do contêiner
+    # O bind interno SEMPRE deve escutar em todas as interfaces do contêiner
     bind_address="0.0.0.0:$port_raft"
 
-    # Se for múltiplas máquinas, o ID único do nó no Raft deve ser o IP real para evitar lookup de DNS
+    # Se for em múltiplas máquinas, passamos o IP real para ID do Raft, evitando lookup de DNS interno
     if [ "$ip_choice" -eq 1 ]; then
         sector_id_env="${sector_ips[$s]}"
     else
@@ -112,38 +112,19 @@ for s in $setores_locais; do
       dockerfile: Sectors/Dockerfile
     container_name: sector$s
     restart: always
-EOF
-
-    # Se for em máquinas diferentes (Opção 1), aplica o modo host
-    if [ "$ip_choice" -eq 1 ]; then
-        cat << EOF >> docker-compose.yaml
-    network_mode: "host"
-EOF
-    fi
-
-    # Continua com o ambiente e volumes
-    cat << EOF >> docker-compose.yaml
     environment:
       - SECTOR_ID=$sector_id_env
       - BIND_ADDR=$bind_address
       - PEERS=$peers_string
       - DATA_DIR=/tmp/raft-sector$s
       - HTTP_PORT=$port_http
-    volumes:
-      - raft-data-$s:/tmp/raft-sector$s
-EOF
-
-    # Se NÃO for modo host (Opção 2), precisamos expor as portas explicitamente
-    if [ "$ip_choice" -eq 2 ]; then
-        cat << EOF >> docker-compose.yaml
     ports:
       - "$port_raft:$port_raft"
       - "$port_http:$port_http"
-EOF
-    fi
+    volumes:
+      - raft-data-$s:/tmp/raft-sector$s
 
-    # Quebra de linha para o próximo serviço
-    echo "" >> docker-compose.yaml
+EOF
 done
 
 # Adiciona a seção de volumes apenas para os setores locais
@@ -164,5 +145,5 @@ docker compose down -v 2>/dev/null
 
 echo ""
 echo "✓ Configuração concluída com sucesso para esta máquina!"
-echo "O arquivo 'docker-compose.yaml' foi gerado de forma otimizada para o seu cenário."
+echo "O arquivo 'docker-compose.yaml' foi gerado utilizando mapeamento explícito de portas."
 echo "Para iniciar, execute: docker compose up --build"
