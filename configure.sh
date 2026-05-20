@@ -95,9 +95,15 @@ for s in $setores_locais; do
     port_raft=$((5000 + s))
     port_http=$((7000 + s))
 
-    # CORREÇÃO: Independentemente do modo, o bind interno deve ser 0.0.0.0
-    # para permitir conexões externas na interface de rede hospedeira.
+    # O bind interno deve ser sempre 0.0.0.0 para aceitar conexões vindas de fora do contêiner
     bind_address="0.0.0.0:$port_raft"
+
+    # Se for múltiplas máquinas, o ID único do nó no Raft deve ser o IP real para evitar lookup de DNS
+    if [ "$ip_choice" -eq 1 ]; then
+        sector_id_env="${sector_ips[$s]}"
+    else
+        sector_id_env="sector$s"
+    fi
 
     cat << EOF >> docker-compose.yaml
   sector$s:
@@ -118,7 +124,7 @@ EOF
     # Continua com o ambiente e volumes
     cat << EOF >> docker-compose.yaml
     environment:
-      - SECTOR_ID=sector$s
+      - SECTOR_ID=$sector_id_env
       - BIND_ADDR=$bind_address
       - PEERS=$peers_string
       - DATA_DIR=/tmp/raft-sector$s
