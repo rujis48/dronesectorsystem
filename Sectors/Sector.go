@@ -125,7 +125,6 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Count how many peers are not self to size the array correctly
 	peerCount := 0
 	for _, peer := range peers {
 		parts := strings.Split(peer, ":")
@@ -144,7 +143,6 @@ func main() {
 		Address: raft.ServerAddress(bindAddr),
 	}
 
-	// Add peers, skipping self
 	index := 0
 	for _, peer := range peers {
 		parts := strings.Split(peer, ":")
@@ -153,7 +151,7 @@ func main() {
 		}
 		peerID := parts[0]
 		if peerID == id {
-			continue // Skip self
+			continue
 		}
 
 		peerIPs, err := net.LookupIP(peerID)
@@ -196,47 +194,44 @@ func main() {
 				future := r.Apply(data, 10*time.Second)
 				if future.Error() == nil {
 					if dronesList := future.Response(); dronesList != nil {
-						ds := dronesList.([]drones.Drone)
-						for _, d := range ds {
-							if d.Status == "fixing" && !d.FinishAt.IsZero() && time.Now().After(d.FinishAt) {
-								log.Printf("[LÍDER] Tempo esgotado! Liberando drone %d do Setor %s", d.ID, d.AssignedTo)
+						// CORREÇÃO PROTEGIDA CONTRA PANIC (Type Assertion Segura)
+						if ds, ok := dronesList.([]drones.Drone); ok {
+							for _, d := range ds {
+								if d.Status == "fixing" && !d.FinishAt.IsZero() && time.Now().After(d.FinishAt) {
+									log.Printf("[LÍDER] Tempo esgotado! Liberando drone %d do Setor %s", d.ID, d.AssignedTo)
 
-								// Testa falha simulada do drone (30% de chance)
-								failureCmd := drones.Command{Op: "simulate_drone_failure", DroneID: d.ID}
-								failureData, _ := json.Marshal(failureCmd)
-								failureFuture := r.Apply(failureData, 10*time.Second)
+									failureCmd := drones.Command{Op: "simulate_drone_failure", DroneID: d.ID}
+									failureData, _ := json.Marshal(failureCmd)
+									failureFuture := r.Apply(failureData, 10*time.Second)
 
-								if failureFuture.Error() == nil {
-									if failureResult := failureFuture.Response(); failureResult != nil {
-										if failureMap, ok := failureResult.(map[string]interface{}); ok {
-											if failed, ok := failureMap["failed"].(bool); ok && failed {
-												log.Printf("[FAILURE] ✗ Drone %d FALHOU após o conserto!", d.ID)
-												// Falha de drone é registrada, aguardando healthcheck
-												continue
+									if failureFuture.Error() == nil {
+										if failureResult := failureFuture.Response(); failureResult != nil {
+											if failureMap, ok := failureResult.(map[string]interface{}); ok {
+												if failed, ok := failureMap["failed"].(bool); ok && failed {
+													log.Printf("[FAILURE] ✗ Drone %d FALHOU após o conserto!", d.ID)
+													continue
+												}
 											}
 										}
 									}
+
+									heartbeatCmd := drones.Command{Op: "heartbeat_drone", DroneID: d.ID}
+									heartbeatData, _ := json.Marshal(heartbeatCmd)
+									r.Apply(heartbeatData, 10*time.Second)
+									log.Printf("[HEARTBEAT] ✓ Drone %d respondeu (healthcheck OK)", d.ID)
+
+									finishCmd := drones.Command{Op: "finish_fix", DroneID: d.ID}
+									finishData, _ := json.Marshal(finishCmd)
+									r.Apply(finishData, 10*time.Second)
+
+									log.Printf("[LÍDER] Processando fila distribuída após liberação...")
+									processQueueCmd := drones.Command{
+										Op:              "process_queue",
+										DurationSeconds: 0,
+									}
+									queueData, _ := json.Marshal(processQueueCmd)
+									r.Apply(queueData, 10*time.Second)
 								}
-
-								// Drone bem-sucedido: Envia heartbeat
-								heartbeatCmd := drones.Command{Op: "heartbeat_drone", DroneID: d.ID}
-								heartbeatData, _ := json.Marshal(heartbeatCmd)
-								r.Apply(heartbeatData, 10*time.Second)
-								log.Printf("[HEARTBEAT] ✓ Drone %d respondeu (healthcheck OK)", d.ID)
-
-								// Libera o drone normalmente
-								finishCmd := drones.Command{Op: "finish_fix", DroneID: d.ID}
-								finishData, _ := json.Marshal(finishCmd)
-								r.Apply(finishData, 10*time.Second)
-
-								// Tenta processar fila após liberar drone
-								log.Printf("[LÍDER] Processando fila distribuída após liberação...")
-								processQueueCmd := drones.Command{
-									Op:              "process_queue",
-									DurationSeconds: 0, // Será recalculado ao processar
-								}
-								queueData, _ := json.Marshal(processQueueCmd)
-								r.Apply(queueData, 10*time.Second)
 							}
 						}
 					}
@@ -246,10 +241,9 @@ func main() {
 	}()
 
 	// Rotina do Líder: Monitoramento contínuo da fila distribuída
-	// Processa requisições enfileiradas periodicamente
 	go func() {
 		for {
-			time.Sleep(5 * time.Second) // Processa fila a cada 5 segundos
+			time.Sleep(5 * time.Second)
 			if r.State() == raft.Leader {
 				queueSize := fsm.GetQueueSize()
 				if queueSize > 0 {
@@ -281,9 +275,8 @@ func main() {
 	// Rotina do Líder: Healthcheck de Drones - Detecta e recupera drones mortos
 	go func() {
 		for {
-			time.Sleep(7 * time.Second) // Verifica a cada 7 segundos
+			time.Sleep(7 * time.Second)
 			if r.State() == raft.Leader {
-				// Detecta drones mortos
 				detectCmd := drones.Command{Op: "detect_dead_drones"}
 				data, _ := json.Marshal(detectCmd)
 				future := r.Apply(data, 10*time.Second)
@@ -296,27 +289,27 @@ func main() {
 								for _, deadIDIface := range deadDronesSlice {
 									if deadID, ok := deadIDIface.(float64); ok {
 										droneID := int(deadID)
-										// Obtém informações do drone morto
 										getDronesCmd := drones.Command{Op: "get_drones"}
 										getDronesData, _ := json.Marshal(getDronesCmd)
 										getDronesFuture := r.Apply(getDronesData, 10*time.Second)
 										if getDronesFuture.Error() == nil {
 											if dronesList := getDronesFuture.Response(); dronesList != nil {
-												dronesList := dronesList.([]drones.Drone)
-												var droneSetor string
-												for _, d := range dronesList {
-													if d.ID == droneID {
-														droneSetor = d.AssignedTo
-														break
+												// CORREÇÃO PROTEGIDA CONTRA PANIC (Type Assertion Segura)
+												if ds, ok := dronesList.([]drones.Drone); ok {
+													var droneSetor string
+													for _, d := range ds {
+														if d.ID == droneID {
+															droneSetor = d.AssignedTo
+															break
+														}
 													}
+													createCmd := drones.Command{
+														Op:       "create_drone",
+														SectorID: droneSetor,
+													}
+													createData, _ := json.Marshal(createCmd)
+													r.Apply(createData, 10*time.Second)
 												}
-												// Cria novo drone para substituição
-												createCmd := drones.Command{
-													Op:       "create_drone",
-													SectorID: droneSetor,
-												}
-												createData, _ := json.Marshal(createCmd)
-												r.Apply(createData, 10*time.Second)
 											}
 										}
 									}
@@ -329,24 +322,20 @@ func main() {
 		}
 	}()
 
-	// Causador de problemas (O Líder atua como gerador global de demandas para todo o ecossistema)
+	// Causador de problemas
 	go func() {
 		rand.Seed(time.Now().UnixNano())
-
-		// Lista de setores conhecidos pelo ecossistema para sorteio distribuído
 		allSectors := []string{"sector1", "sector2", "sector3"}
 
 		for {
 			interval := time.Duration(rand.Intn(10)+5) * time.Second
 			time.Sleep(interval)
 
-			// Se este nó não for o líder, ele permanece passivo
 			if r.State() != raft.Leader {
 				continue
 			}
 
 			severity := selectProblemSeverity()
-
 			estimatedDrones := 1
 			switch severity {
 			case "medium":
@@ -357,13 +346,10 @@ func main() {
 
 			fixTime := computeFixDuration(severity, estimatedDrones)
 			durationSecs := int(fixTime.Seconds())
-
-			// Sorteia qual setor da rede vai sofrer o problema (pode ser o 1, 2 ou 3)
 			targetSector := allSectors[rand.Intn(len(allSectors))]
 
 			log.Printf("[LÍDER] Problema %s GERADO para %s. Drones necessários: %d. Duração: %ds", severity, targetSector, estimatedDrones, durationSecs)
 
-			// Comando com timeout melhorado (20 segundos para aplicação)
 			cmd := drones.Command{
 				Op:              "assign_with_fallback",
 				SectorID:        targetSector,
@@ -373,7 +359,6 @@ func main() {
 			data, _ := json.Marshal(cmd)
 			future := r.Apply(data, 20*time.Second)
 
-			// Tratamento robusto de erros e timeouts
 			if future.Error() != nil {
 				log.Printf("[LÍDER] ✗ Erro ao aplicar comando para %s: %v", targetSector, future.Error())
 				continue
@@ -443,13 +428,10 @@ func main() {
 		_ = json.NewEncoder(w).Encode(status)
 	})
 
-	// endpoint de 'Health Check' com confirmação de recebimento
 	mux.HandleFunc("/confirm", func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 
-		// Verifica se o Raft está em estado saudável (não Shutdown)
-		// States válidos: Follower, Candidate, Leader
 		currentState := r.State()
 		isHealthy := currentState != raft.Shutdown
 
@@ -465,7 +447,6 @@ func main() {
 		_ = json.NewEncoder(w).Encode(confirmResp)
 	})
 
-	// Endpoint para consultar a fila distribuída
 	mux.HandleFunc("/queue", func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -484,16 +465,15 @@ func main() {
 		_ = json.NewEncoder(w).Encode(queueResp)
 	})
 
-	// Endpoint com estatísticas da fila
 	mux.HandleFunc("/queue/status", func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 
 		queue := fsm.GetQueue()
-		drones := fsm.GetDrones()
+		dronesList := fsm.GetDrones()
 
 		availableCount := 0
-		for _, d := range drones {
+		for _, d := range dronesList {
 			if d.Status == "available" {
 				availableCount++
 			}
@@ -508,14 +488,13 @@ func main() {
 			"sector_id":              id,
 			"queue_size":             len(queue),
 			"drones_available":       availableCount,
-			"drones_total":           len(drones),
+			"drones_total":           len(dronesList),
 			"oldest_request_age_sec": int(oldestReqAge.Seconds()),
 			"is_leader":              r.State() == raft.Leader,
 		}
 		_ = json.NewEncoder(w).Encode(queueStatus)
 	})
 
-	// Endpoint para visualizar status de healthcheck dos drones
 	mux.HandleFunc("/drones/health", func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")

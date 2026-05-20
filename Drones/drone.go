@@ -4,29 +4,35 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"math/rand"
 	"sync"
 	"time"
 
 	"github.com/hashicorp/raft"
 )
 
-// Estrutura do Drone.
+// Estrutura do Drone atualizada com os campos para Health Check.
 type Drone struct {
 	ID         int       `json:"id"`
 	AssignedTo string    `json:"assigned_to"` // Sempre conterá o ID de um setor (nunca vazio)
-	Status     string    `json:"status"`      // "available", "fixing"
+	Status     string    `json:"status"`      // "available", "fixing", "dead"
 	FinishAt   time.Time `json:"finish_at"`   // Momento exato em que o drone deve ser liberado
+
+	// --- CAMPOS PARA MONITORAMENTO DE SAÚDE E HEALTH CHECK ---
+	Health               string    `json:"health"`                // "healthy", "critical"
+	LastHeartbeat        time.Time `json:"last_heartbeat"`        // Última resposta válida
+	ConsecutiveFailures  int       `json:"consecutive_failures"`  // Contador de falhas
+	ConsecutiveSuccesses int       `json:"consecutive_successes"` // Contador de sucessos
 }
 
 // PendingRequest representa uma requisição enfileirada aguardando drones disponíveis.
-// Faz parte da Fila Distribuída implementada por Raft.
 type PendingRequest struct {
-	ID              string    `json:"id"`               // ID único da requisição
-	SectorID        string    `json:"sector_id"`        // Setor que solicitou
-	Severity        string    `json:"severity"`         // "easy", "medium", "hard"
-	DurationSeconds int       `json:"duration_seconds"` // Tempo estimado para conserto
-	DronesNeeded    int       `json:"drones_needed"`    // Quantidade de drones necessários
-	QueuedAt        time.Time `json:"queued_at"`        // Timestamp do enfileiramento
+	ID              string    `json:"id"`
+	SectorID        string    `json:"sector_id"`
+	Severity        string    `json:"severity"`
+	DurationSeconds int       `json:"duration_seconds"`
+	DronesNeeded    int       `json:"drones_needed"`
+	QueuedAt        time.Time `json:"queued_at"`
 }
 
 // Comando para a máquina de estados.
@@ -35,18 +41,17 @@ type Command struct {
 	SectorID        string `json:"sector_id,omitempty"`
 	DroneID         int    `json:"drone_id,omitempty"`
 	Severity        string `json:"severity,omitempty"`
-	DurationSeconds int    `json:"duration_seconds,omitempty"` // Tempo determinado para o conserto
-	RequestID       string `json:"request_id,omitempty"`       // ID da requisição (para queue)
+	DurationSeconds int    `json:"duration_seconds,omitempty"`
+	RequestID       string `json:"request_id,omitempty"`
 }
 
 // Máquina de estados para gerenciar os drones e fila distribuída.
 type FSM struct {
 	mu     sync.Mutex
 	drones []Drone
-	queue  []PendingRequest // Fila distribuída via Raft
+	queue  []PendingRequest
 }
 
-// Função aplicação da severidade da demanda para os drones.
 var severityDemand = map[string]int{
 	"easy":   1,
 	"medium": 2,
@@ -71,12 +76,10 @@ func (f *FSM) Apply(raftLog *raft.Log) interface{} {
 			needed = 1
 		}
 		assigned := make([]int, 0, needed)
-
-		// Calcula deterministicamente o momento de finalização baseado no tempo enviado no comando
 		finishTime := time.Now().Add(time.Duration(cmd.DurationSeconds) * time.Second)
 
 		for i, drone := range f.drones {
-			if drone.Status == "available" {
+			if drone.Status == "available" && drone.Health != "critical" {
 				f.drones[i].AssignedTo = cmd.SectorID
 				f.drones[i].Status = "fixing"
 				f.drones[i].FinishAt = finishTime
@@ -95,7 +98,6 @@ func (f *FSM) Apply(raftLog *raft.Log) interface{} {
 		return assigned
 
 	case "assign_with_fallback":
-		// Versão melhorada com fallback automático para outros setores
 		needed := severityDemand[cmd.Severity]
 		if needed == 0 {
 			needed = 1
@@ -103,9 +105,8 @@ func (f *FSM) Apply(raftLog *raft.Log) interface{} {
 		assigned := make([]int, 0, needed)
 		finishTime := time.Now().Add(time.Duration(cmd.DurationSeconds) * time.Second)
 
-		// Primeira tentativa: aloca para o setor solicitado
 		for i, drone := range f.drones {
-			if drone.Status == "available" {
+			if drone.Status == "available" && drone.Health != "critical" {
 				f.drones[i].AssignedTo = cmd.SectorID
 				f.drones[i].Status = "fixing"
 				f.drones[i].FinishAt = finishTime
@@ -117,7 +118,6 @@ func (f *FSM) Apply(raftLog *raft.Log) interface{} {
 			}
 		}
 
-		// Se não conseguiu alocar todos, enfileira a requisição
 		if len(assigned) < needed {
 			reqID := cmd.RequestID
 			if reqID == "" {
@@ -129,7 +129,7 @@ func (f *FSM) Apply(raftLog *raft.Log) interface{} {
 				SectorID:        cmd.SectorID,
 				Severity:        cmd.Severity,
 				DurationSeconds: cmd.DurationSeconds,
-				DronesNeeded:    needed - len(assigned), // Quantidade faltante
+				DronesNeeded:    needed - len(assigned),
 				QueuedAt:        time.Now(),
 			}
 			f.queue = append(f.queue, pendingReq)
@@ -143,16 +143,9 @@ func (f *FSM) Apply(raftLog *raft.Log) interface{} {
 				return map[string]interface{}{"queued": true, "request_id": reqID}
 			}
 		}
-
-		if len(assigned) == 0 {
-			log.Printf("[ASSIGN_FALLBACK] Falha: sem drones disponíveis no cluster")
-			return nil
-		}
-
 		return assigned
 
 	case "queue_request":
-		// Comando explícito para enfileirar uma requisição
 		reqID := cmd.RequestID
 		if reqID == "" {
 			reqID = cmd.SectorID + "-" + time.Now().Format("20060102150405")
@@ -172,13 +165,11 @@ func (f *FSM) Apply(raftLog *raft.Log) interface{} {
 			QueuedAt:        time.Now(),
 		}
 		f.queue = append(f.queue, pendingReq)
-		log.Printf("[FILA] Requisição enfileirada - ID: %s para %s (fila tamanho: %d)", reqID, cmd.SectorID, len(f.queue))
 		return map[string]interface{}{"queued": true, "request_id": reqID, "queue_size": len(f.queue)}
 
 	case "process_queue":
-		// Processa fila: tenta alocar drones para requisições enfileiradas
 		if len(f.queue) == 0 {
-			return map[string]interface{}{"processed": 0}
+			return map[string]interface{}{"processed": 0, "remaining_queue": 0}
 		}
 
 		processed := 0
@@ -188,9 +179,8 @@ func (f *FSM) Apply(raftLog *raft.Log) interface{} {
 		for _, req := range f.queue {
 			assigned := make([]int, 0, req.DronesNeeded)
 
-			// Tenta alocar drones para esta requisição
 			for i, drone := range f.drones {
-				if drone.Status == "available" && len(assigned) < req.DronesNeeded {
+				if drone.Status == "available" && drone.Health != "critical" && len(assigned) < req.DronesNeeded {
 					f.drones[i].AssignedTo = req.SectorID
 					f.drones[i].Status = "fixing"
 					f.drones[i].FinishAt = finishTime
@@ -199,29 +189,20 @@ func (f *FSM) Apply(raftLog *raft.Log) interface{} {
 			}
 
 			if len(assigned) == req.DronesNeeded {
-				// Requisição completamente satisfeita
-				log.Printf("[FILA] Requisição processada e satisfeita - ID: %s (%d drones para %s)",
-					req.ID, len(assigned), req.SectorID)
 				processed++
 			} else if len(assigned) > 0 {
-				// Alocação parcial: atualiza requisição e mantém na fila
 				updatedReq := req
 				updatedReq.DronesNeeded -= len(assigned)
 				newQueue = append(newQueue, updatedReq)
-				log.Printf("[FILA] Alocação parcial para %s - ID: %s (%d drones, %d pendente)",
-					req.SectorID, req.ID, len(assigned), updatedReq.DronesNeeded)
 			} else {
-				// Nenhum drone disponível, mantém na fila
 				newQueue = append(newQueue, req)
 			}
 		}
 
 		f.queue = newQueue
-		log.Printf("[FILA] Processamento concluído: %d requisições satisfeitas, %d permanecendo na fila", processed, len(f.queue))
 		return map[string]interface{}{"processed": processed, "remaining_queue": len(f.queue)}
 
 	case "get_queue":
-		// Retorna fila atual (cópia para leitura segura)
 		queueCopy := make([]PendingRequest, len(f.queue))
 		copy(queueCopy, f.queue)
 		return queueCopy
@@ -230,20 +211,78 @@ func (f *FSM) Apply(raftLog *raft.Log) interface{} {
 		for i, drone := range f.drones {
 			if drone.ID == cmd.DroneID && drone.Status == "fixing" {
 				f.drones[i].Status = "available"
-				f.drones[i].FinishAt = time.Time{} // Zera o timer
-				// ATENÇÃO: f.drones[i].AssignedTo NÃO é limpo. O drone continua fisicamente no setor atual.
+				f.drones[i].FinishAt = time.Time{}
 				log.Printf("Drone %d finished fixing and remains STATIONED at sector %s", drone.ID, f.drones[i].AssignedTo)
 				return true
 			}
 		}
-		log.Printf("Drone %d not found or not fixing", cmd.DroneID)
 		return false
 
 	case "get_drones":
-		// Retorna uma cópia para evitar problemas de concorrência na leitura externa via comando Raft
 		dronesCopy := make([]Drone, len(f.drones))
 		copy(dronesCopy, f.drones)
 		return dronesCopy
+
+	// --- CASES EXIGIDOS PELAS ROTINAS DO SECTOR.GO ---
+	case "simulate_drone_failure":
+		failed := rand.Intn(100) < 30
+		for i, drone := range f.drones {
+			if drone.ID == cmd.DroneID {
+				if failed {
+					f.drones[i].ConsecutiveFailures++
+					f.drones[i].ConsecutiveSuccesses = 0
+					if f.drones[i].ConsecutiveFailures >= 3 {
+						f.drones[i].Health = "critical"
+						f.drones[i].Status = "dead"
+					}
+				}
+				return map[string]interface{}{"failed": failed}
+			}
+		}
+		return map[string]interface{}{"failed": false}
+
+	case "heartbeat_drone":
+		for i, drone := range f.drones {
+			if drone.ID == cmd.DroneID && drone.Health != "critical" {
+				f.drones[i].LastHeartbeat = time.Now()
+				f.drones[i].ConsecutiveSuccesses++
+				f.drones[i].ConsecutiveFailures = 0
+				return true
+			}
+		}
+		return false
+
+	case "detect_dead_drones":
+		deadDrones := make([]int, 0)
+		now := time.Now()
+		for i, drone := range f.drones {
+			timeSinceHeartbeat := now.Sub(drone.LastHeartbeat).Seconds()
+			if drone.Health == "critical" || (drone.Status == "fixing" && timeSinceHeartbeat > 15 && !drone.LastHeartbeat.IsZero()) {
+				if drone.Status != "dead" {
+					f.drones[i].Status = "dead"
+					f.drones[i].Health = "critical"
+				}
+				deadDrones = append(deadDrones, drone.ID)
+			}
+		}
+		return map[string]interface{}{"dead_drones": deadDrones}
+
+	case "create_drone":
+		newID := len(f.drones)
+		sector := cmd.SectorID
+		if sector == "" {
+			sector = "sector1"
+		}
+		newDrone := Drone{
+			ID:            newID,
+			AssignedTo:    sector,
+			Status:        "available",
+			Health:        "healthy",
+			LastHeartbeat: time.Now(),
+		}
+		f.drones = append(f.drones, newDrone)
+		log.Printf("[FSM] Novo drone %d criado para substituir unidade perdida no %s", newID, sector)
+		return newID
 
 	default:
 		log.Printf("Unknown command: %s", cmd.Op)
@@ -251,21 +290,16 @@ func (f *FSM) Apply(raftLog *raft.Log) interface{} {
 	}
 }
 
-// Implementação da interface Snapshot do Raft.
-// Inclui tanto drones quanto fila distribuída.
 func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return &fsmSnapshot{drones: f.drones, queue: f.queue}, nil
 }
 
-// Implementação da interface Restore do Raft.
-// Restaura tanto drones quanto fila distribuída.
 func (f *FSM) Restore(rc io.ReadCloser) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	// Tenta decodificar como nova estrutura (com fila)
 	type FullState struct {
 		Drones []Drone          `json:"drones"`
 		Queue  []PendingRequest `json:"queue"`
@@ -273,7 +307,6 @@ func (f *FSM) Restore(rc io.ReadCloser) error {
 
 	var state FullState
 	if err := json.NewDecoder(rc).Decode(&state); err != nil {
-		// Fallback para estrutura antiga (apenas drones)
 		rc.Close()
 		return json.NewDecoder(rc).Decode(&f.drones)
 	}
@@ -288,7 +321,6 @@ type fsmSnapshot struct {
 	queue  []PendingRequest
 }
 
-// Persiste snapshot incluindo drones e fila.
 func (s *fsmSnapshot) Persist(sink raft.SnapshotSink) error {
 	state := map[string]interface{}{
 		"drones": s.drones,
@@ -304,12 +336,18 @@ func (s *fsmSnapshot) Persist(sink raft.SnapshotSink) error {
 func (s *fsmSnapshot) Release() {}
 
 func NewFSM(initialCount int) *FSM {
-	drones := make([]Drone, initialCount)
+	dronesList := make([]Drone, initialCount)
 	for i := 0; i < initialCount; i++ {
-		// Inicializa todos os drones estacionados no "sector1" para cumprir a regra de negócio
-		drones[i] = Drone{ID: i, AssignedTo: "sector1", Status: "available", FinishAt: time.Time{}}
+		dronesList[i] = Drone{
+			ID:            i,
+			AssignedTo:    "sector1",
+			Status:        "available",
+			FinishAt:      time.Time{},
+			Health:        "healthy",
+			LastHeartbeat: time.Now(),
+		}
 	}
-	return &FSM{drones: drones, queue: make([]PendingRequest, 0)}
+	return &FSM{drones: dronesList, queue: make([]PendingRequest, 0)}
 }
 
 func (f *FSM) GetAvailableCount() int {
@@ -317,27 +355,22 @@ func (f *FSM) GetAvailableCount() int {
 	defer f.mu.Unlock()
 	count := 0
 	for _, drone := range f.drones {
-		if drone.Status == "available" {
+		if drone.Status == "available" && drone.Health != "critical" {
 			count++
 		}
 	}
 	return count
 }
 
-// CORREÇÃO: Método adicionado para expor a leitura local de forma segura
-// Permite que a API HTTP dos seguidores leia o estado atual sem violar o consenso
 func (f *FSM) GetDrones() []Drone {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	// Cria e retorna um clone isolado para evitar condições de corrida com gravações em paralelo
 	dronesCopy := make([]Drone, len(f.drones))
 	copy(dronesCopy, f.drones)
 	return dronesCopy
 }
 
-// GetQueue retorna uma cópia da fila distribuída de forma segura.
-// Permite que setores monitorem requisições enfileiradas sem violar mutex.
 func (f *FSM) GetQueue() []PendingRequest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -347,7 +380,6 @@ func (f *FSM) GetQueue() []PendingRequest {
 	return queueCopy
 }
 
-// GetQueueSize retorna o tamanho atual da fila de forma thread-safe.
 func (f *FSM) GetQueueSize() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
