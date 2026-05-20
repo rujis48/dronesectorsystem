@@ -95,12 +95,9 @@ for s in $setores_locais; do
     port_raft=$((5000 + s))
     port_http=$((7000 + s))
 
-    # Define o endereço correto baseado no tipo de rede escolhido
-    if [ "$ip_choice" -eq 1 ]; then
-        bind_address="${sector_ips[$s]}:$port_raft"
-    else
-        bind_address="0.0.0.0:$port_raft"
-    fi
+    # CORREÇÃO: Independentemente do modo, o bind interno deve ser 0.0.0.0
+    # para permitir conexões externas na interface de rede hospedeira.
+    bind_address="0.0.0.0:$port_raft"
 
     cat << EOF >> docker-compose.yaml
   sector$s:
