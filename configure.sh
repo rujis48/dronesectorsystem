@@ -14,7 +14,7 @@ fi
 
 # Como você deseja definir os IPs dos setores?
 echo ""
-echo "1) Digitar manualmente o IP de cada setor"
+echo "1) Digitar manualmente o IP de cada setor (Múltiplas Máquinas)"
 echo "2) Usar IPs automáticos (127.0.0.1 para todos) - para ambiente local dockerizado"
 read -p "Escolha uma opção (1 ou 2): " ip_choice
 
@@ -48,7 +48,6 @@ else
 fi
 
 # 3. Construção da string de PEERS (comum a todos)
-# Formato: ip1:5001,ip2:5002,ip3:5003...
 peers_string=""
 for ((i=1; i<=total_setores; i++)); do
     port=$((5000 + i))
@@ -89,13 +88,19 @@ EOF
 
 # Adiciona apenas os serviços selecionados para esta máquina
 for s in $setores_locais; do
-    # Garante que é um número válido dentro do escopo
     if ! [[ "$s" =~ ^[0-9]+$ ]] || [ "$s" -gt "$total_setores" ] || [ "$s" -le 0 ]; then
         continue
     fi
 
     port_raft=$((5000 + s))
     port_http=$((7000 + s))
+
+    # Define o endereço correto baseado no tipo de rede escolhido
+    if [ "$ip_choice" -eq 1 ]; then
+        bind_address="${sector_ips[$s]}:$port_raft"
+    else
+        bind_address="0.0.0.0:$port_raft"
+    fi
 
     cat << EOF >> docker-compose.yaml
   sector$s:
@@ -104,19 +109,38 @@ for s in $setores_locais; do
       dockerfile: Sectors/Dockerfile
     container_name: sector$s
     restart: always
+EOF
+
+    # Se for em máquinas diferentes (Opção 1), aplica o modo host
+    if [ "$ip_choice" -eq 1 ]; then
+        cat << EOF >> docker-compose.yaml
+    network_mode: "host"
+EOF
+    fi
+
+    # Continua com o ambiente e volumes
+    cat << EOF >> docker-compose.yaml
     environment:
       - SECTOR_ID=sector$s
-      - BIND_ADDR=0.0.0.0:$port_raft
+      - BIND_ADDR=$bind_address
       - PEERS=$peers_string
       - DATA_DIR=/tmp/raft-sector$s
       - HTTP_PORT=$port_http
+    volumes:
+      - raft-data-$s:/tmp/raft-sector$s
+EOF
+
+    # Se NÃO for modo host (Opção 2), precisamos expor as portas explicitamente
+    if [ "$ip_choice" -eq 2 ]; then
+        cat << EOF >> docker-compose.yaml
     ports:
       - "$port_raft:$port_raft"
       - "$port_http:$port_http"
-    volumes:
-      - raft-data-$s:/tmp/raft-sector$s
-
 EOF
+    fi
+
+    # Quebra de linha para o próximo serviço
+    echo "" >> docker-compose.yaml
 done
 
 # Adiciona a seção de volumes apenas para os setores locais
@@ -137,5 +161,5 @@ docker compose down -v 2>/dev/null
 
 echo ""
 echo "✓ Configuração concluída com sucesso para esta máquina!"
-echo "O arquivo 'docker-compose.yaml' foi gerado contendo APENAS os seus setores locais."
+echo "O arquivo 'docker-compose.yaml' foi gerado de forma otimizada para o seu cenário."
 echo "Para iniciar, execute: docker compose up --build"
