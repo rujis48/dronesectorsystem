@@ -14,7 +14,7 @@ fi
 
 # Como você deseja definir os IPs dos setores?
 echo ""
-echo "1) Digitar manualmente o IP de cada setor (Múltiplas Máquinas)"
+echo "1) Digitar manualmente o IP de cada setor"
 echo "2) Usar IPs automáticos (127.0.0.1 para todos) - para ambiente local dockerizado"
 read -p "Escolha uma opção (1 ou 2): " ip_choice
 
@@ -48,6 +48,7 @@ else
 fi
 
 # 3. Construção da string de PEERS (comum a todos)
+# Formato: ip1:5001,ip2:5002,ip3:5003...
 peers_string=""
 for ((i=1; i<=total_setores; i++)); do
     port=$((5000 + i))
@@ -82,12 +83,13 @@ echo ""
 echo "Gerando docker-compose.yaml..."
 
 # Início do arquivo
-cat << EOF > docker-compose.yaml
+cat << EOF > sudo docker-compose.yaml
 services:
 EOF
 
 # Adiciona apenas os serviços selecionados para esta máquina
 for s in $setores_locais; do
+    # Garante que é um número válido dentro do escopo
     if ! [[ "$s" =~ ^[0-9]+$ ]] || [ "$s" -gt "$total_setores" ] || [ "$s" -le 0 ]; then
         continue
     fi
@@ -95,26 +97,16 @@ for s in $setores_locais; do
     port_raft=$((5000 + s))
     port_http=$((7000 + s))
 
-    # O bind interno SEMPRE deve escutar em todas as interfaces do contêiner
-    bind_address="0.0.0.0:$port_raft"
-
-    # Se for em múltiplas máquinas, passamos o IP real para ID do Raft, evitando lookup de DNS interno
-    if [ "$ip_choice" -eq 1 ]; then
-        sector_id_env="${sector_ips[$s]}"
-    else
-        sector_id_env="sector$s"
-    fi
-
-    cat << EOF >> docker-compose.yaml
+    cat << EOF >> sudo docker-compose.yaml
   sector$s:
     build:
       context: .
       dockerfile: Sectors/Dockerfile
     container_name: sector$s
-    restart: always
+    restart: always 
     environment:
-      - SECTOR_ID=$sector_id_env
-      - BIND_ADDR=$bind_address
+      - SECTOR_ID=sector$s
+      - BIND_ADDR=0.0.0.0:$port_raft
       - PEERS=$peers_string
       - DATA_DIR=/tmp/raft-sector$s
       - HTTP_PORT=$port_http
@@ -128,7 +120,7 @@ EOF
 done
 
 # Adiciona a seção de volumes apenas para os setores locais
-cat << EOF >> docker-compose.yaml
+cat << EOF >> sudo docker-compose.yaml
 volumes:
 EOF
 
@@ -136,14 +128,14 @@ for s in $setores_locais; do
     if ! [[ "$s" =~ ^[0-9]+$ ]] || [ "$s" -gt "$total_setores" ] || [ "$s" -le 0 ]; then
         continue
     fi
-    echo "  raft-data-$s:" >> docker-compose.yaml
+    echo "sudo raft-data-$s:" >> sudo docker-compose.yaml
 done
 
 # 6. Finalização e limpeza do Docker
 echo "Limpando volumes antigos locais para evitar conflitos..."
-docker compose down -v 2>/dev/null
+sudo docker compose down -v 2>/dev/null
 
 echo ""
-echo "✓ Configuração concluída com sucesso para esta máquina!"
-echo "O arquivo 'docker-compose.yaml' foi gerado utilizando mapeamento explícito de portas."
+echo "Configuração concluída com sucesso para esta máquina!"
+echo "O arquivo 'docker-compose.yaml' foi gerado contendo APENAS os seus setores locais."
 echo "Para iniciar, execute: docker compose up --build"

@@ -8,7 +8,9 @@ services:
     environment:
       - SECTOR_ID=sector1
       - BIND_ADDR=sector1:5001
-      - PEERS=sector2:5002,sector3:5003
+      - ADVERTISE_ADDR=
+      - BOOTSTRAP=true
+      - PEERS=sector1:5001,sector2:5002,sector3:5003
       - DATA_DIR=/tmp/raft-sector1
       - HTTP_PORT=7001
     ports:
@@ -26,7 +28,9 @@ services:
     environment:
       - SECTOR_ID=sector2
       - BIND_ADDR=sector2:5002
-      - PEERS=sector1:5001,sector3:5003
+      - ADVERTISE_ADDR=
+      - BOOTSTRAP=false
+      - PEERS=sector1:5001,sector2:5002,sector3:5003
       - DATA_DIR=/tmp/raft-sector2
       - HTTP_PORT=7002
     ports:
@@ -44,7 +48,9 @@ services:
     environment:
       - SECTOR_ID=sector3
       - BIND_ADDR=sector3:5003
-      - PEERS=sector1:5001,sector2:5002
+      - ADVERTISE_ADDR=
+      - BOOTSTRAP=false
+      - PEERS=sector1:5001,sector2:5002,sector3:5003
       - DATA_DIR=/tmp/raft-sector3
       - HTTP_PORT=7003
     ports:
