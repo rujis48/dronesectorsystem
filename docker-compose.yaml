@@ -4,11 +4,11 @@ services:
       context: .
       dockerfile: Sectors/Dockerfile
     container_name: sector1
-    restart: always 
+    restart: always
     environment:
       - SECTOR_ID=sector1
       - BIND_ADDR=0.0.0.0:5001
-      - PEERS=192.168.0.95:5001,192.168.0.98:5002
+      - PEERS=sector1=sector1:5001,sector2=sector2:5002,sector3=sector3:5003
       - DATA_DIR=/tmp/raft-sector1
       - HTTP_PORT=7001
     ports:
@@ -17,5 +17,43 @@ services:
     volumes:
       - raft-data-1:/tmp/raft-sector1
 
+  sector2:
+    build:
+      context: .
+      dockerfile: Sectors/Dockerfile
+    container_name: sector2
+    restart: always
+    environment:
+      - SECTOR_ID=sector2
+      - BIND_ADDR=0.0.0.0:5002
+      - PEERS=sector1=sector1:5001,sector2=sector2:5002,sector3=sector3:5003
+      - DATA_DIR=/tmp/raft-sector2
+      - HTTP_PORT=7002
+    ports:
+      - "5002:5002"
+      - "7002:7002"
+    volumes:
+      - raft-data-2:/tmp/raft-sector2
+
+  sector3:
+    build:
+      context: .
+      dockerfile: Sectors/Dockerfile
+    container_name: sector3
+    restart: always
+    environment:
+      - SECTOR_ID=sector3
+      - BIND_ADDR=0.0.0.0:5003
+      - PEERS=sector1=sector1:5001,sector2=sector2:5002,sector3=sector3:5003
+      - DATA_DIR=/tmp/raft-sector3
+      - HTTP_PORT=7003
+    ports:
+      - "5003:5003"
+      - "7003:7003"
+    volumes:
+      - raft-data-3:/tmp/raft-sector3
+
 volumes:
   raft-data-1:
+  raft-data-2:
+  raft-data-3:

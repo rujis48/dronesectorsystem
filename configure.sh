@@ -15,7 +15,7 @@ fi
 # Como você deseja definir os IPs dos setores?
 echo ""
 echo "1) Digitar manualmente o IP de cada setor"
-echo "2) Usar IPs automáticos (127.0.0.1 para todos) - para ambiente local dockerizado"
+echo "2) Usar IPs automáticos (nomes Docker) - para ambiente local dockerizado"
 read -p "Escolha uma opção (1 ou 2): " ip_choice
 
 # Validar a escolha
@@ -47,16 +47,21 @@ else
     done
 fi
 
-# 3. Construção da string de PEERS (comum a todos)
-# Formato: ip1:5001,ip2:5002,ip3:5003...
+# 3. Construção da string de PEERS
+# Formato: sectorID=host:port,sectorID=host:port
+# Exemplo manual: sector1=192.168.0.95:5001,sector2=192.168.0.98:5002
+# Exemplo auto:   sector1=sector1:5001,sector2=sector2:5002
 peers_string=""
 for ((i=1; i<=total_setores; i++)); do
     port=$((5000 + i))
-    peers_string+="${sector_ips[$i]}:$port"
+    peers_string+="sector${i}=${sector_ips[$i]}:$port"
     if [ $i -lt $total_setores ]; then
         peers_string+=","
     fi
 done
+
+echo ""
+echo "PEERS gerado: $peers_string"
 
 # 4. Identificação do que roda NESTA máquina
 echo ""
@@ -146,4 +151,10 @@ sudo docker compose down -v 2>/dev/null
 echo ""
 echo "Configuração concluída com sucesso para esta máquina!"
 echo "O arquivo 'docker-compose.yaml' foi gerado contendo APENAS os seus setores locais."
+echo ""
+echo "PEERS configurados: $peers_string"
+echo ""
+echo "IMPORTANTE: Execute o mesmo configure.sh nas OUTRAS máquinas,"
+echo "escolhendo os setores correspondentes a cada uma."
+echo ""
 echo "Para iniciar, execute: docker compose up --build"

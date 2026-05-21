@@ -68,8 +68,31 @@ func main() {
 	if peersStr == "" {
 		log.Fatal("PEERS not set")
 	}
-	peers := strings.Split(peersStr, ",")
 	advertiseAddrEnv := os.Getenv("ADVERTISE_ADDR")
+
+	// Parse PEERS: formato "sectorID=host:port,sectorID=host:port"
+	// Exemplo: "sector1=192.168.0.95:5001,sector2=192.168.0.98:5002"
+	// Exemplo auto: "sector1=sector1:5001,sector2=sector2:5002"
+	type peerEntry struct {
+		id      string
+		address string // host:port
+	}
+	var peers []peerEntry
+	for _, raw := range strings.Split(peersStr, ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		// Formato: sectorID=host:port
+		eqIdx := strings.Index(raw, "=")
+		if eqIdx < 0 {
+			log.Fatalf("Formato de PEERS inválido: %s (esperado sectorID=host:port)", raw)
+		}
+		sectorID := raw[:eqIdx]
+		addr := raw[eqIdx+1:]
+		peers = append(peers, peerEntry{id: sectorID, address: addr})
+	}
+	log.Printf("[RAFT] Peers parseados: %d entradas", len(peers))
 
 	// --- RESOLUÇÃO DINÂMICA DE ENDEREÇO UNIVERSAL ---
 	// BIND_ADDR define onde o transporte TCP escuta (bind).
@@ -144,12 +167,7 @@ func main() {
 	// Count how many peers are not self to size the array correctly
 	peerCount := 0
 	for _, peer := range peers {
-		parts := strings.Split(peer, ":")
-		if len(parts) != 2 {
-			continue
-		}
-		peerID := parts[0]
-		if peerID != id {
+		if peer.id != id {
 			peerCount++
 		}
 	}
@@ -157,31 +175,38 @@ func main() {
 	servers := make([]raft.Server, 1+peerCount)
 	servers[0] = raft.Server{
 		ID:      raft.ServerID(id),
-		Address: raft.ServerAddress(bindAddr),
+		Address: raft.ServerAddress(advertiseAddr),
 	}
 
 	// Add peers, skipping self
 	index := 0
 	for _, peer := range peers {
-		parts := strings.Split(peer, ":")
-		if len(parts) != 2 {
-			continue
-		}
-		peerID := parts[0]
-		if peerID == id {
+		if peer.id == id {
 			continue // Skip self
 		}
 
-		peerIPs, err := net.LookupIP(peerID)
+		// Resolve o endereço do peer
+		host, port, err := net.SplitHostPort(peer.address)
 		if err != nil {
-			log.Fatalf("Falha ao resolver IP do peer %s: %v", peerID, err)
+			log.Fatalf("Formato de endereço inválido para peer %s: %s", peer.id, peer.address)
 		}
-		realPeerAddr := peerIPs[0].String() + ":" + parts[1]
+
+		// Se o host não for IP, resolve via DNS
+		if net.ParseIP(host) == nil {
+			peerIPs, err := net.LookupIP(host)
+			if err != nil {
+				log.Fatalf("Falha ao resolver IP do peer %s (%s): %v", peer.id, host, err)
+			}
+			host = peerIPs[0].String()
+		}
+
+		resolvedAddr := host + ":" + port
+		log.Printf("[RAFT] Peer %s → %s", peer.id, resolvedAddr)
 
 		index++
 		servers[index] = raft.Server{
-			ID:      raft.ServerID(peerID),
-			Address: raft.ServerAddress(realPeerAddr),
+			ID:      raft.ServerID(peer.id),
+			Address: raft.ServerAddress(resolvedAddr),
 		}
 	}
 
