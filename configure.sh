@@ -97,19 +97,27 @@ for s in $setores_locais; do
     port_raft=$((5000 + s))
     port_http=$((7000 + s))
 
+    # Em modo manual, adiciona ADVERTISE_ADDR com o IP real da máquina
+    if [ "$ip_choice" -eq 1 ]; then
+        advertise_line="      - ADVERTISE_ADDR=${sector_ips[$s]}:$port_raft"
+    else
+        advertise_line=""
+    fi
+
     cat << EOF >> docker-compose.yaml
   sector$s:
     build:
       context: .
       dockerfile: Sectors/Dockerfile
     container_name: sector$s
-    restart: always 
+    restart: always
     environment:
       - SECTOR_ID=sector$s
       - BIND_ADDR=0.0.0.0:$port_raft
       - PEERS=$peers_string
       - DATA_DIR=/tmp/raft-sector$s
       - HTTP_PORT=$port_http
+${advertise_line}
     ports:
       - "$port_raft:$port_raft"
       - "$port_http:$port_http"

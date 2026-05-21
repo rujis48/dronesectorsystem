@@ -69,8 +69,13 @@ func main() {
 		log.Fatal("PEERS not set")
 	}
 	peers := strings.Split(peersStr, ",")
+	advertiseAddrEnv := os.Getenv("ADVERTISE_ADDR")
 
 	// --- RESOLUÇÃO DINÂMICA DE ENDEREÇO UNIVERSAL ---
+	// BIND_ADDR define onde o transporte TCP escuta (bind).
+	// ADVERTISE_ADDR define qual endereço é anunciado aos outros peers.
+	// Em ambientes Docker multi-máquina, o bind pode ser 0.0.0.0 mas
+	// o advertise deve ser o IP real da máquina na rede.
 	host, portPart, err := net.SplitHostPort(bindAddrEnv)
 	if err != nil {
 		log.Fatalf("Erro ao decodificar BIND_ADDR: %v", err)
@@ -87,7 +92,18 @@ func main() {
 	realIP := ips[0].String()
 	bindAddr := realIP + ":" + portPart
 
-	log.Printf("[RAFT] Configurando nó %s com endereço anunciável: %s", id, bindAddr)
+	// Endereço anunciado: usa ADVERTISE_ADDR se definido, senão usa bindAddr
+	advertiseAddr := bindAddr
+	if advertiseAddrEnv != "" {
+		// Garante que tem porta
+		if !strings.Contains(advertiseAddrEnv, ":") {
+			advertiseAddrEnv = advertiseAddrEnv + ":" + portPart
+		}
+		advertiseAddr = advertiseAddrEnv
+		log.Printf("[RAFT] Usando ADVERTISE_ADDR explícito: %s", advertiseAddr)
+	}
+
+	log.Printf("[RAFT] Configurando nó %s | bind=%s | advertise=%s", id, bindAddr, advertiseAddr)
 	// -------------------------------------------------
 
 	initialCount := 5
@@ -96,11 +112,11 @@ func main() {
 	config := raft.DefaultConfig()
 	config.LocalID = raft.ServerID(id)
 
-	addr, err := net.ResolveTCPAddr("tcp", bindAddr)
+	advertiseTCPAddr, err := net.ResolveTCPAddr("tcp", advertiseAddr)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Erro ao resolver ADVERTISE_ADDR %s: %v", advertiseAddr, err)
 	}
-	transport, err := raft.NewTCPTransport(bindAddr, addr, 3, 10*time.Second, os.Stderr)
+	transport, err := raft.NewTCPTransport(bindAddr, advertiseTCPAddr, 3, 10*time.Second, os.Stderr)
 	if err != nil {
 		log.Fatal(err)
 	}
