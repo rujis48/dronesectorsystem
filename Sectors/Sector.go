@@ -70,9 +70,7 @@ func main() {
 	}
 	advertiseAddrEnv := os.Getenv("ADVERTISE_ADDR")
 
-	// Parse PEERS: formato "sectorID=host:port,sectorID=host:port"
-	// Exemplo: "sector1=192.168.0.95:5001,sector2=192.168.0.98:5002"
-	// Exemplo auto: "sector1=sector1:5001,sector2=sector2:5002"
+	// Parse PEERS: formato sendo: "sectorID=host:port,sectorID=host:port"
 	type peerEntry struct {
 		id      string
 		address string // host:port
@@ -94,11 +92,7 @@ func main() {
 	}
 	log.Printf("[RAFT] Peers parseados: %d entradas", len(peers))
 
-	// --- RESOLUÇÃO DINÂMICA DE ENDEREÇO UNIVERSAL ---
-	// BIND_ADDR define onde o transporte TCP escuta (bind).
-	// ADVERTISE_ADDR define qual endereço é anunciado aos outros peers.
-	// Em ambientes Docker multi-máquina, o bind pode ser 0.0.0.0 mas
-	// o advertise deve ser o IP real da máquina na rede.
+	
 	host, portPart, err := net.SplitHostPort(bindAddrEnv)
 	if err != nil {
 		log.Fatalf("Erro ao decodificar BIND_ADDR: %v", err)
@@ -115,7 +109,7 @@ func main() {
 	realIP := ips[0].String()
 	bindAddr := realIP + ":" + portPart
 
-	// Endereço anunciado: usa ADVERTISE_ADDR se definido, senão usa bindAddr
+	// Endereço anunciado: ADVERTISE_ADDR se definido, senão usa bindAddr
 	advertiseAddr := bindAddr
 	if advertiseAddrEnv != "" {
 		// Garante que tem porta
@@ -127,7 +121,6 @@ func main() {
 	}
 
 	log.Printf("[RAFT] Configurando nó %s | bind=%s | advertise=%s", id, bindAddr, advertiseAddr)
-	// -------------------------------------------------
 
 	initialCount := 5
 	fsm := drones.NewFSM(initialCount)
@@ -178,11 +171,11 @@ func main() {
 		Address: raft.ServerAddress(advertiseAddr),
 	}
 
-	// Add peers, skipping self
+	// Adiciona peers e ignora si mesmo usando skip
 	index := 0
 	for _, peer := range peers {
 		if peer.id == id {
-			continue // Skip self
+			continue 
 		}
 
 		// Resolve o endereço do peer
@@ -252,7 +245,7 @@ func main() {
 										if failureMap, ok := failureResult.(map[string]interface{}); ok {
 											if failed, ok := failureMap["failed"].(bool); ok && failed {
 												log.Printf("[FAILURE] ✗ Drone %d FALHOU após o conserto!", d.ID)
-												// Falha de drone é registrada, aguardando healthcheck
+												// Falha de drone é registrada, aguarda healthcheck
 												continue
 											}
 										}
@@ -274,7 +267,7 @@ func main() {
 								log.Printf("[LÍDER] Processando fila distribuída após liberação...")
 								processQueueCmd := drones.Command{
 									Op:              "process_queue",
-									DurationSeconds: 0, // Será recalculado ao processar
+									DurationSeconds: 0, // Recalculado ao processar
 								}
 								queueData, _ := json.Marshal(processQueueCmd)
 								r.Apply(queueData, 10*time.Second)
@@ -319,7 +312,7 @@ func main() {
 		}
 	}()
 
-	// Rotina do Líder: Healthcheck de Drones - Detecta e recupera drones mortos
+	// Rotina do Líder: Healthcheck de Drones
 	go func() {
 		for {
 			time.Sleep(7 * time.Second) // Verifica a cada 7 segundos
@@ -349,7 +342,7 @@ func main() {
 													break
 												}
 											}
-											// Cria novo drone para substituição
+											// Cria novo drone para substituição do que morreu
 											createCmd := drones.Command{
 												Op:       "create_drone",
 												SectorID: droneSetor,
@@ -367,18 +360,18 @@ func main() {
 		}
 	}()
 
-	// Causador de problemas (O Líder atua como gerador global de demandas para todo o ecossistema)
+	// Causador de problemas para os setores (Trocar o nome engraçado depois...)
 	go func() {
 		rand.Seed(time.Now().UnixNano())
 
-		// Lista de setores conhecidos pelo ecossistema para sorteio distribuído
+		// Lista de setores conhecidos pelo ecossistema para sorteio distribuído (No momento hardcoded para setor1 ao setor3. Alterar para ser capaz de incluir todos os setores com base na quantidade)
 		allSectors := []string{"sector1", "sector2", "sector3"}
 
 		for {
 			interval := time.Duration(rand.Intn(10)+5) * time.Second
 			time.Sleep(interval)
 
-			// Se este nó não for o líder, ele permanece passivo
+			// Se o nó não for o líder, ele permanece passivo
 			if r.State() != raft.Leader {
 				continue
 			}
@@ -396,12 +389,12 @@ func main() {
 			fixTime := computeFixDuration(severity, estimatedDrones)
 			durationSecs := int(fixTime.Seconds())
 
-			// Sorteia qual setor da rede vai sofrer o problema (pode ser o 1, 2 ou 3)
+			// Sorteia qual setor da rede vai sofrer o problema (pode ser o 1, 2 ou 3) <- Alterar depois
 			targetSector := allSectors[rand.Intn(len(allSectors))]
 
 			log.Printf("[LÍDER] Problema %s GERADO para %s. Drones necessários: %d. Duração: %ds", severity, targetSector, estimatedDrones, durationSecs)
 
-			// Comando com timeout melhorado (20 segundos para aplicação)
+			// Comando com timeout
 			cmd := drones.Command{
 				Op:              "assign_with_fallback",
 				SectorID:        targetSector,
@@ -411,7 +404,7 @@ func main() {
 			data, _ := json.Marshal(cmd)
 			future := r.Apply(data, 20*time.Second)
 
-			// Tratamento robusto de erros e timeouts
+			// Tratamento de erros e timeouts
 			if future.Error() != nil {
 				log.Printf("[LÍDER] ✗ Erro ao aplicar comando para %s: %v", targetSector, future.Error())
 				continue
@@ -481,13 +474,12 @@ func main() {
 		_ = json.NewEncoder(w).Encode(status)
 	})
 
-	// endpoint de 'Health Check' com confirmação de recebimento
+	// endpoint de 'Health Check' com confirmação
 	mux.HandleFunc("/confirm", func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 
 		// Verifica se o Raft está em estado saudável (não Shutdown)
-		// States válidos: Follower, Candidate, Leader
 		currentState := r.State()
 		isHealthy := currentState != raft.Shutdown
 
