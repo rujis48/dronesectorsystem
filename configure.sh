@@ -83,7 +83,7 @@ echo ""
 echo "Gerando docker-compose.yaml..."
 
 # Início do arquivo
-cat << EOF > sudo docker-compose.yaml
+cat << EOF > docker-compose.yaml
 services:
 EOF
 
@@ -97,7 +97,7 @@ for s in $setores_locais; do
     port_raft=$((5000 + s))
     port_http=$((7000 + s))
 
-    cat << EOF >> sudo docker-compose.yaml
+    cat << EOF >> docker-compose.yaml
   sector$s:
     build:
       context: .
@@ -120,7 +120,7 @@ EOF
 done
 
 # Adiciona a seção de volumes apenas para os setores locais
-cat << EOF >> sudo docker-compose.yaml
+cat << EOF >> docker-compose.yaml
 volumes:
 EOF
 
@@ -128,7 +128,7 @@ for s in $setores_locais; do
     if ! [[ "$s" =~ ^[0-9]+$ ]] || [ "$s" -gt "$total_setores" ] || [ "$s" -le 0 ]; then
         continue
     fi
-    echo "sudo raft-data-$s:" >> sudo docker-compose.yaml
+    echo "  raft-data-$s:" >> docker-compose.yaml
 done
 
 # 6. Finalização e limpeza do Docker

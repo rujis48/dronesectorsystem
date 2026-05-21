@@ -292,32 +292,29 @@ func main() {
 					if result := future.Response(); result != nil {
 						if resultMap, ok := result.(map[string]interface{}); ok {
 							deadDronesIface := resultMap["dead_drones"]
-							if deadDronesSlice, ok := deadDronesIface.([]interface{}); ok && len(deadDronesSlice) > 0 {
-								for _, deadIDIface := range deadDronesSlice {
-									if deadID, ok := deadIDIface.(float64); ok {
-										droneID := int(deadID)
-										// Obtém informações do drone morto
-										getDronesCmd := drones.Command{Op: "get_drones"}
-										getDronesData, _ := json.Marshal(getDronesCmd)
-										getDronesFuture := r.Apply(getDronesData, 10*time.Second)
-										if getDronesFuture.Error() == nil {
-											if dronesList := getDronesFuture.Response(); dronesList != nil {
-												dronesList := dronesList.([]drones.Drone)
-												var droneSetor string
-												for _, d := range dronesList {
-													if d.ID == droneID {
-														droneSetor = d.AssignedTo
-														break
-													}
+							if deadDronesSlice, ok := deadDronesIface.([]int); ok && len(deadDronesSlice) > 0 {
+								for _, droneID := range deadDronesSlice {
+									// Obtém informações do drone morto
+									getDronesCmd := drones.Command{Op: "get_drones"}
+									getDronesData, _ := json.Marshal(getDronesCmd)
+									getDronesFuture := r.Apply(getDronesData, 10*time.Second)
+									if getDronesFuture.Error() == nil {
+										if dronesList := getDronesFuture.Response(); dronesList != nil {
+											dronesList := dronesList.([]drones.Drone)
+											var droneSetor string
+											for _, d := range dronesList {
+												if d.ID == droneID {
+													droneSetor = d.AssignedTo
+													break
 												}
-												// Cria novo drone para substituição
-												createCmd := drones.Command{
-													Op:       "create_drone",
-													SectorID: droneSetor,
-												}
-												createData, _ := json.Marshal(createCmd)
-												r.Apply(createData, 10*time.Second)
 											}
+											// Cria novo drone para substituição
+											createCmd := drones.Command{
+												Op:       "create_drone",
+												SectorID: droneSetor,
+											}
+											createData, _ := json.Marshal(createCmd)
+											r.Apply(createData, 10*time.Second)
 										}
 									}
 								}
