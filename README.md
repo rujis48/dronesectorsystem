@@ -30,15 +30,15 @@ Sistema distribuído de gestão de drones utilizando consenso **Raft** para coor
 ## Arquitetura Geral
 
 ```
-                    ┌─────────────────────────┐
-                    │     Monitor (Terminal)    │
+                    ┌──────────────────────────┐
+                    │     Monitor (Terminal)   │
                     │   Descobre setores via   │
                     │   scan de portas HTTP    │
                     └────────────┬─────────────┘
                                  │ HTTP (polling)
                     ┌────────────┼─────────────┐
-                    │            │              │
-              ┌─────▼─────┐ ┌───▼───────┐ ┌───▼───────┐
+                    │            │             │
+              ┌─────▼──────┐ ┌───▼────────┐ ┌──▼─────────┐
               │  Sector 1  │ │  Sector 2  │ │  Sector 3  │
               │  (Líder)   │ │ (Follower) │ │ (Follower) │
               │  HTTP :7001│ │ HTTP :7002 │ │ HTTP :7003 │
@@ -424,7 +424,7 @@ O setor restante perde o cargo de líder e congela a aplicação de novos comand
 
 ---
 
-## Notas e Curiosidades
+## Notas
 
 - O sistema usa **BoltDB** como backend de persistência para o Raft log e stable store. Os dados sobrevivem a restarts dos containers graças aos volumes Docker nomeados.
 
