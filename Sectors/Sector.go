@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -92,7 +93,6 @@ func main() {
 	}
 	log.Printf("[RAFT] Peers parseados: %d entradas", len(peers))
 
-	
 	host, portPart, err := net.SplitHostPort(bindAddrEnv)
 	if err != nil {
 		log.Fatalf("Erro ao decodificar BIND_ADDR: %v", err)
@@ -123,7 +123,7 @@ func main() {
 	log.Printf("[RAFT] Configurando nó %s | bind=%s | advertise=%s", id, bindAddr, advertiseAddr)
 
 	initialCount := 5
-	fsm := drones.NewFSM(initialCount)
+	fsm := drones.NewFSM(initialCount, id)
 
 	config := raft.DefaultConfig()
 	config.LocalID = raft.ServerID(id)
@@ -175,7 +175,7 @@ func main() {
 	index := 0
 	for _, peer := range peers {
 		if peer.id == id {
-			continue 
+			continue
 		}
 
 		// Resolve o endereço do peer
@@ -313,6 +313,10 @@ func main() {
 	}()
 
 	// Rotina do Líder: Healthcheck de Drones
+	// Rastreamento de falhas consecutivas por setor (para liberação de drones)
+	sectorFailures := make(map[string]int)
+	const sectorFailureThreshold = 3 // Libera drones após 3 falhas consecutivas (~21 segundos)
+
 	go func() {
 		for {
 			time.Sleep(7 * time.Second) // Verifica a cada 7 segundos
@@ -357,6 +361,41 @@ func main() {
 					}
 				}
 			}
+
+			// Healthcheck de setores: detectar setores caídos e liberar seus drones
+			if r.State() == raft.Leader {
+				for _, peer := range peers {
+					if peer.id == id {
+						continue // Não verifica a si mesmo
+					}
+
+					// Tenta conectar no setor via HTTP
+					alive := false
+					if host, port, err := net.SplitHostPort(peer.address); err == nil {
+						if raftPort, err := strconv.Atoi(port); err == nil {
+							httpPort := strconv.Itoa(raftPort + 2000)
+							client := http.Client{Timeout: 2 * time.Second}
+							resp, err := client.Get("http://" + host + ":" + httpPort + "/status")
+							if err == nil {
+								resp.Body.Close()
+								alive = true
+							}
+						}
+					}
+
+					if alive {
+						sectorFailures[peer.id] = 0
+					} else {
+						sectorFailures[peer.id]++
+						if sectorFailures[peer.id] == sectorFailureThreshold {
+							log.Printf("[LÍDER] Setor %s offline há %d ciclos — liberando seus drones", peer.id, sectorFailureThreshold)
+							releaseCmd := drones.Command{Op: "release_sector_drones", SectorID: peer.id}
+							releaseData, _ := json.Marshal(releaseCmd)
+							r.Apply(releaseData, 10*time.Second)
+						}
+					}
+				}
+			}
 		}
 	}()
 
@@ -364,8 +403,11 @@ func main() {
 	go func() {
 		rand.Seed(time.Now().UnixNano())
 
-		// Lista de setores conhecidos pelo ecossistema para sorteio distribuído (No momento hardcoded para setor1 ao setor3. Alterar para ser capaz de incluir todos os setores com base na quantidade)
-		allSectors := []string{"sector1", "sector2", "sector3"}
+		// Lista de setores conhecidos pelo ecossistema para sorteio distribuído (derivada da variável de ambiente PEERS)
+		allSectors := make([]string, 0, len(peers))
+		for _, peer := range peers {
+			allSectors = append(allSectors, peer.id)
+		}
 
 		for {
 			interval := time.Duration(rand.Intn(10)+5) * time.Second
@@ -444,14 +486,18 @@ func main() {
 
 	httpPort := os.Getenv("HTTP_PORT")
 	if httpPort == "" {
-		switch id {
-		case "sector1":
-			httpPort = "7001"
-		case "sector2":
-			httpPort = "7002"
-		case "sector3":
-			httpPort = "7003"
-		default:
+		// Tenta derivar a porta HTTP a partir da porta Raft do setor atual na configuração PEERS
+		for _, peer := range peers {
+			if peer.id == id {
+				if _, port, err := net.SplitHostPort(peer.address); err == nil {
+					if raftPort, err := strconv.Atoi(port); err == nil {
+						httpPort = strconv.Itoa(raftPort + 2000)
+					}
+				}
+				break
+			}
+		}
+		if httpPort == "" {
 			httpPort = "7000"
 		}
 	}

@@ -50,6 +50,7 @@ type FSM struct {
 	mu     sync.Mutex
 	drones []Drone
 	queue  []PendingRequest
+	nextID int // Próximo ID sequencial para novos drones
 }
 
 var severityDemand = map[string]int{
@@ -174,10 +175,10 @@ func (f *FSM) Apply(raftLog *raft.Log) interface{} {
 
 		processed := 0
 		newQueue := make([]PendingRequest, 0)
-		finishTime := time.Now().Add(time.Duration(cmd.DurationSeconds) * time.Second)
 
 		for _, req := range f.queue {
 			assigned := make([]int, 0, req.DronesNeeded)
+			finishTime := time.Now().Add(time.Duration(req.DurationSeconds) * time.Second)
 
 			for i, drone := range f.drones {
 				if drone.Status == "available" && drone.Health != "critical" && len(assigned) < req.DronesNeeded {
@@ -267,22 +268,52 @@ func (f *FSM) Apply(raftLog *raft.Log) interface{} {
 		}
 		return map[string]interface{}{"dead_drones": deadDrones}
 
+	case "release_sector_drones":
+		released := 0
+		for i, drone := range f.drones {
+			if drone.AssignedTo == cmd.SectorID && drone.Status == "fixing" {
+				f.drones[i].Status = "available"
+				f.drones[i].FinishAt = time.Time{}
+				released++
+			}
+		}
+		if released > 0 {
+			log.Printf("[FSM] %d drone(s) liberado(s) do setor caído %s", released, cmd.SectorID)
+		}
+		return map[string]interface{}{"released": released}
+
 	case "create_drone":
-		newID := len(f.drones)
 		sector := cmd.SectorID
 		if sector == "" {
-			sector = "sector1"
+			log.Printf("[FSM] WARNING: create_drone chamado sem SectorID, usando 'unknown'")
+			sector = "unknown"
 		}
+
 		newDrone := Drone{
-			ID:            newID,
+			ID:            f.nextID,
 			AssignedTo:    sector,
 			Status:        "available",
 			Health:        "healthy",
 			LastHeartbeat: time.Now(),
 		}
-		f.drones = append(f.drones, newDrone)
-		log.Printf("[FSM] Novo drone %d criado para substituir unidade perdida no %s", newID, sector)
-		return newID
+		f.nextID++
+
+		// Tenta reutilizar slot de drone morto para evitar crescimento infinito do pool
+		reused := false
+		for i, drone := range f.drones {
+			if drone.Status == "dead" {
+				f.drones[i] = newDrone
+				reused = true
+				log.Printf("[FSM] Drone %d substituiu drone morto no slot %d para %s", newDrone.ID, i, sector)
+				break
+			}
+		}
+
+		if !reused {
+			f.drones = append(f.drones, newDrone)
+			log.Printf("[FSM] Novo drone %d criado para %s (pool: %d)", newDrone.ID, sector, len(f.drones))
+		}
+		return newDrone.ID
 
 	default:
 		log.Printf("Unknown command: %s", cmd.Op)
@@ -293,7 +324,7 @@ func (f *FSM) Apply(raftLog *raft.Log) interface{} {
 func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return &fsmSnapshot{drones: f.drones, queue: f.queue}, nil
+	return &fsmSnapshot{drones: f.drones, queue: f.queue, nextID: f.nextID}, nil
 }
 
 func (f *FSM) Restore(rc io.ReadCloser) error {
@@ -303,6 +334,7 @@ func (f *FSM) Restore(rc io.ReadCloser) error {
 	type FullState struct {
 		Drones []Drone          `json:"drones"`
 		Queue  []PendingRequest `json:"queue"`
+		NextID int              `json:"nextID"`
 	}
 
 	var state FullState
@@ -313,18 +345,26 @@ func (f *FSM) Restore(rc io.ReadCloser) error {
 
 	f.drones = state.Drones
 	f.queue = state.Queue
+	if state.NextID > 0 {
+		f.nextID = state.NextID
+	} else {
+		// Compatibilidade com snapshots antigos sem nextID
+		f.nextID = len(f.drones)
+	}
 	return nil
 }
 
 type fsmSnapshot struct {
 	drones []Drone
 	queue  []PendingRequest
+	nextID int
 }
 
 func (s *fsmSnapshot) Persist(sink raft.SnapshotSink) error {
 	state := map[string]interface{}{
 		"drones": s.drones,
 		"queue":  s.queue,
+		"nextID": s.nextID,
 	}
 	err := json.NewEncoder(sink).Encode(state)
 	if err != nil {
@@ -335,19 +375,19 @@ func (s *fsmSnapshot) Persist(sink raft.SnapshotSink) error {
 
 func (s *fsmSnapshot) Release() {}
 
-func NewFSM(initialCount int) *FSM {
+func NewFSM(initialCount int, sectorID string) *FSM {
 	dronesList := make([]Drone, initialCount)
 	for i := 0; i < initialCount; i++ {
 		dronesList[i] = Drone{
 			ID:            i,
-			AssignedTo:    "sector1",
+			AssignedTo:    sectorID,
 			Status:        "available",
 			FinishAt:      time.Time{},
 			Health:        "healthy",
 			LastHeartbeat: time.Now(),
 		}
 	}
-	return &FSM{drones: dronesList, queue: make([]PendingRequest, 0)}
+	return &FSM{drones: dronesList, queue: make([]PendingRequest, 0), nextID: initialCount}
 }
 
 func (f *FSM) GetAvailableCount() int {
