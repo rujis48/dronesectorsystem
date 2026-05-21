@@ -226,7 +226,7 @@ func (f *FSM) Apply(raftLog *raft.Log) interface{} {
 
 	// Cases das rotinas do 'setor.go'
 	case "simulate_drone_failure":
-		failed := rand.Intn(100) < 30
+		failed := rand.Intn(100) < 1
 		for i, drone := range f.drones {
 			if drone.ID == cmd.DroneID {
 				if failed {
