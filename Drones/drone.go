@@ -11,14 +11,14 @@ import (
 	"github.com/hashicorp/raft"
 )
 
-// Estrutura do Drone atualizada com os campos para Health Check.
+// Estrutura do Drone
 type Drone struct {
 	ID         int       `json:"id"`
-	AssignedTo string    `json:"assigned_to"` // Sempre conterá o ID de um setor (nunca vazio)
+	AssignedTo string    `json:"assigned_to"` // Sempre conterá o ID de um setor e nunca vai ser vazio
 	Status     string    `json:"status"`      // "available", "fixing", "dead"
 	FinishAt   time.Time `json:"finish_at"`   // Momento exato em que o drone deve ser liberado
 
-	// --- CAMPOS PARA MONITORAMENTO DE SAÚDE E HEALTH CHECK ---
+	// Monitoramento dos drones
 	Health               string    `json:"health"`                // "healthy", "critical"
 	LastHeartbeat        time.Time `json:"last_heartbeat"`        // Última resposta válida
 	ConsecutiveFailures  int       `json:"consecutive_failures"`  // Contador de falhas
@@ -223,7 +223,7 @@ func (f *FSM) Apply(raftLog *raft.Log) interface{} {
 		copy(dronesCopy, f.drones)
 		return dronesCopy
 
-	// --- CASES EXIGIDOS PELAS ROTINAS DO SECTOR.GO ---
+	// Cases das rotinas do 'setor.go'
 	case "simulate_drone_failure":
 		failed := rand.Intn(100) < 30
 		for i, drone := range f.drones {
