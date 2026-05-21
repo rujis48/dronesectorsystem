@@ -14,7 +14,7 @@ fi
 
 # Como você deseja definir os IPs dos setores?
 echo ""
-echo "1) Digitar manualmente o IP de cada setor"
+echo "1) Digitar manualmente o IP de cada setor (multi-máquina)"
 echo "2) Usar IPs automáticos (nomes Docker) - para ambiente local dockerizado"
 read -p "Escolha uma opção (1 ou 2): " ip_choice
 
@@ -29,8 +29,11 @@ declare -A sector_ips
 echo ""
 if [ "$ip_choice" -eq 1 ]; then
     echo "--- PASSO 1: Mapeamento de IPs (Manual) ---"
+    echo "Para cada setor, digite o IP do computador onde ele vai rodar."
+    echo "Setores no MESMO computador devem ter o MESMO IP."
+    echo ""
     for ((i=1; i<=total_setores; i++)); do
-        read -p "Digite o IP do computador onde o Sector $i vai rodar: " ip
+        read -p "IP do computador onde o Sector $i vai rodar: " ip
 
         # Validação simples de IP
         if ! [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
@@ -47,23 +50,7 @@ else
     done
 fi
 
-# 3. Construção da string de PEERS
-# Formato: sectorID=host:port,sectorID=host:port
-# Exemplo manual: sector1=192.168.0.95:5001,sector2=192.168.0.98:5002
-# Exemplo auto:   sector1=sector1:5001,sector2=sector2:5002
-peers_string=""
-for ((i=1; i<=total_setores; i++)); do
-    port=$((5000 + i))
-    peers_string+="sector${i}=${sector_ips[$i]}:$port"
-    if [ $i -lt $total_setores ]; then
-        peers_string+=","
-    fi
-done
-
-echo ""
-echo "PEERS gerado: $peers_string"
-
-# 4. Identificação do que roda NESTA máquina
+# 3. Identificação do que roda NESTA máquina
 echo ""
 echo "--- PASSO 2: Configuração Local ---"
 echo "Quais setores você deseja que rodem NESTA máquina específica?"
@@ -82,6 +69,41 @@ if [ "$has_local" = false ]; then
     echo "Erro: Você precisa selecionar pelo menos um setor válido para esta máquina."
     exit 1
 fi
+
+# 4. Construção da string de PEERS
+# Regra: setores no mesmo computador comunicam via nome Docker (sector1, sector2)
+# Setores em computadores diferentes comunicam via IP real
+# Formato: sectorID=host:port
+#
+# Se ip_choice == 2 (automático), todos usam nomes Docker
+# Se ip_choice == 1 (manual):
+#   - Setares com o mesmo IP → usam nome Docker entre si
+#   - Setores com IP diferente → usam IP real
+
+peers_string=""
+for ((i=1; i<=total_setores; i++)); do
+    port=$((5000 + i))
+    host_for_peer="${sector_ips[$i]}"
+
+    if [ "$ip_choice" -eq 1 ]; then
+        # Verifica se algum setor LOCAL tem o mesmo IP que este setor
+        # Se sim, usa nome Docker; senão, usa IP real
+        for local_s in $setores_locais; do
+            if [[ "$local_s" =~ ^[0-9]+$ ]] && [ "${sector_ips[$local_s]}" == "${sector_ips[$i]}" ]; then
+                host_for_peer="sector$i"
+                break
+            fi
+        done
+    fi
+
+    peers_string+="sector${i}=${host_for_peer}:$port"
+    if [ $i -lt $total_setores ]; then
+        peers_string+=","
+    fi
+done
+
+echo ""
+echo "PEERS gerado: $peers_string"
 
 # 5. Geração do docker-compose.yaml customizado
 echo ""
@@ -102,7 +124,8 @@ for s in $setores_locais; do
     port_raft=$((5000 + s))
     port_http=$((7000 + s))
 
-    # Em modo manual, adiciona ADVERTISE_ADDR com o IP real da máquina
+    # ADVERTISE_ADDR: usa o IP real da máquina (para que peers remotos alcancem este nó)
+    # Só necessário em modo manual (multi-máquina)
     if [ "$ip_choice" -eq 1 ]; then
         advertise_line="      - ADVERTISE_ADDR=${sector_ips[$s]}:$port_raft"
     else
@@ -149,12 +172,16 @@ echo "Limpando volumes antigos locais para evitar conflitos..."
 sudo docker compose down -v 2>/dev/null
 
 echo ""
-echo "Configuração concluída com sucesso para esta máquina!"
-echo "O arquivo 'docker-compose.yaml' foi gerado contendo APENAS os seus setores locais."
+echo "=================================================="
+echo "  Configuração concluída com sucesso!"
+echo "=================================================="
 echo ""
-echo "PEERS configurados: $peers_string"
+echo "  Arquivo: docker-compose.yaml"
+echo "  Setores locais: $setores_locais"
+echo "  PEERS: $peers_string"
 echo ""
-echo "IMPORTANTE: Execute o mesmo configure.sh nas OUTRAS máquinas,"
-echo "escolhendo os setores correspondentes a cada uma."
+echo "  IMPORTANTE: Execute o mesmo configure.sh nas OUTRAS"
+echo "  máquinas, escolhendo os setores correspondentes."
 echo ""
-echo "Para iniciar, execute: docker compose up --build"
+echo "  Para iniciar: docker compose up --build"
+echo "=================================================="

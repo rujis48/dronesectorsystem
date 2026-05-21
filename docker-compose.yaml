@@ -11,6 +11,7 @@ services:
       - PEERS=sector1=sector1:5001,sector2=sector2:5002,sector3=sector3:5003
       - DATA_DIR=/tmp/raft-sector1
       - HTTP_PORT=7001
+
     ports:
       - "5001:5001"
       - "7001:7001"
@@ -29,6 +30,7 @@ services:
       - PEERS=sector1=sector1:5001,sector2=sector2:5002,sector3=sector3:5003
       - DATA_DIR=/tmp/raft-sector2
       - HTTP_PORT=7002
+
     ports:
       - "5002:5002"
       - "7002:7002"
@@ -47,6 +49,7 @@ services:
       - PEERS=sector1=sector1:5001,sector2=sector2:5002,sector3=sector3:5003
       - DATA_DIR=/tmp/raft-sector3
       - HTTP_PORT=7003
+
     ports:
       - "5003:5003"
       - "7003:7003"
